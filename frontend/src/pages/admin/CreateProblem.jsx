@@ -140,7 +140,7 @@ const CreateProblem = () => {
       );
 
       navigate(
-        "/admin/dashboard"
+        "/admin/problems"
       );
 
     } catch (error) {
@@ -590,7 +590,7 @@ const CreateProblem = () => {
               type="button"
               onClick={() =>
                 navigate(
-                  "/admin/dashboard"
+                  "/admin/problems"
                 )
               }
               className="border border-slate-300 bg-white !text-slate-700"

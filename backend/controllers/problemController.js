@@ -1,4 +1,5 @@
 import Problem from "../models/Problem.js";
+import Submission from "../models/Submission.js";
 
 
 // ================= CREATE PROBLEM =================
@@ -74,8 +75,42 @@ export const getTodayProblem = async (req, res) => {
       });
     }
 
+    let isSolved = false;
+    let lastSubmission = null;
+
+    if (req.user?.userId) {
+      const acceptedSub = await Submission.findOne({
+        user: req.user.userId,
+        problem: problem._id,
+        status: "accepted",
+      }).sort({ createdAt: -1 });
+
+      if (acceptedSub) {
+        isSolved = true;
+        lastSubmission = acceptedSub;
+      } else {
+        lastSubmission = await Submission.findOne({
+          user: req.user.userId,
+          problem: problem._id,
+        }).sort({ createdAt: -1 });
+      }
+    }
+
     res.status(200).json({
-      problem,
+      problem: {
+        ...problem.toObject(),
+        isSolved: Boolean(isSolved),
+      },
+      lastSubmission: lastSubmission
+        ? {
+            _id: lastSubmission._id,
+            code: lastSubmission.code,
+            status: lastSubmission.status,
+            allPassed: lastSubmission.status === "accepted",
+            aiEvaluation: lastSubmission.aiEvaluation,
+            submittedAt: lastSubmission.submittedAt || lastSubmission.createdAt,
+          }
+        : null,
     });
 
   } catch (error) {
@@ -92,12 +127,30 @@ export const getTodayProblem = async (req, res) => {
 
 export const getAllProblems = async (req, res) => {
   try {
-    const problems = await Problem.find({
-      status: "published",
-    }).sort({ publishDate: -1 });
+    const filter =
+      req.user && req.user.role === "admin" ? {} : { status: "published" };
+
+    const problems = await Problem.find(filter).sort({
+      publishDate: -1,
+      createdAt: -1,
+    });
+
+    let solvedSet = new Set();
+    if (req.user?.userId) {
+      const solvedIds = await Submission.distinct("problem", {
+        user: req.user.userId,
+        status: "accepted",
+      });
+      solvedSet = new Set(solvedIds.map((id) => id.toString()));
+    }
+
+    const problemsWithSolved = problems.map((p) => ({
+      ...p.toObject(),
+      isSolved: solvedSet.has(p._id.toString()),
+    }));
 
     res.status(200).json({
-      problems,
+      problems: problemsWithSolved,
     });
 
   } catch (error) {
@@ -124,12 +177,46 @@ export const getProblemById = async (req, res) => {
       });
     }
 
+    let isSolved = false;
+    let lastSubmission = null;
+
+    if (req.user?.userId) {
+      const acceptedSub = await Submission.findOne({
+        user: req.user.userId,
+        problem: problem._id,
+        status: "accepted",
+      }).sort({ createdAt: -1 });
+
+      if (acceptedSub) {
+        isSolved = true;
+        lastSubmission = acceptedSub;
+      } else {
+        lastSubmission = await Submission.findOne({
+          user: req.user.userId,
+          problem: problem._id,
+        }).sort({ createdAt: -1 });
+      }
+    }
+
     res.status(200).json({
-      problem,
+      problem: {
+        ...problem.toObject(),
+        isSolved: Boolean(isSolved),
+      },
+      lastSubmission: lastSubmission
+        ? {
+            _id: lastSubmission._id,
+            code: lastSubmission.code,
+            status: lastSubmission.status,
+            allPassed: lastSubmission.status === "accepted",
+            aiEvaluation: lastSubmission.aiEvaluation,
+            submittedAt: lastSubmission.submittedAt || lastSubmission.createdAt,
+          }
+        : null,
     });
 
   } catch (error) {
-    console.log(error.message);
+    console.error("GET PROBLEM BY ID ERROR:", error);
 
     res.status(500).json({
       message: "Failed to fetch problem",

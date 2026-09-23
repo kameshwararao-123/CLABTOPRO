@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { CheckCircle } from "lucide-react";
 
 import { getAllProblems } from "../../services/problemService";
 import Loader from "../../components/common/Loader";
@@ -45,16 +46,29 @@ const Problems = () => {
         {problems.map((problem) => (
           <div
             key={problem._id}
-            className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-1 hover:shadow-md"
+            className={`rounded-2xl border bg-white p-5 shadow-sm transition hover:-translate-y-1 hover:shadow-md ${
+              problem.isSolved
+                ? "border-emerald-200 bg-emerald-50/20"
+                : "border-slate-200"
+            }`}
           >
             <div className="flex items-center justify-between">
               <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-600">
-                {problem.topic?.name}
+                {problem.topic || problem.topic?.name || "Basics"}
               </span>
 
-              <span className="text-xs capitalize text-slate-400">
-                {problem.difficulty}
-              </span>
+              <div className="flex items-center gap-2">
+                {problem.isSolved && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-bold text-emerald-700 border border-emerald-200">
+                    <CheckCircle size={12} />
+                    Solved
+                  </span>
+                )}
+
+                <span className="text-xs capitalize text-slate-400">
+                  {problem.difficulty}
+                </span>
+              </div>
             </div>
 
             <h2 className="mt-4 text-xl font-bold text-slate-800">
@@ -67,9 +81,20 @@ const Problems = () => {
 
             <Link
               to={`/problems/${problem._id}`}
-              className="mt-5 inline-block font-semibold text-indigo-600 hover:text-indigo-700"
+              className={`mt-5 inline-flex items-center gap-1.5 font-semibold text-sm transition ${
+                problem.isSolved
+                  ? "text-emerald-600 hover:text-emerald-700 font-bold"
+                  : "text-indigo-600 hover:text-indigo-700"
+              }`}
             >
-              Solve →
+              {problem.isSolved ? (
+                <>
+                  <CheckCircle size={15} />
+                  Solved
+                </>
+              ) : (
+                "Solve →"
+              )}
             </Link>
           </div>
         ))}

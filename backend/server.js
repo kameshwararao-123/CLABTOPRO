@@ -1,6 +1,8 @@
-import express from 'express'
-import cors from 'cors';
 import dotenv from 'dotenv';
+dotenv.config();
+
+import express from 'express';
+import cors from 'cors';
 import connectDB from './configs/db.js';
 
 import authRoutes from "./routes/authRoutes.js";
@@ -10,12 +12,11 @@ import submissionRoutes from "./routes/submissionRoutes.js";
 import progressRoutes from "./routes/progressRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 
+const app = express();
 
-const app=express();
-//for configurations..
 app.use(cors());
-dotenv.config();
 app.use(express.json());
+
 //mongodb connection...
 await connectDB();
 //route...
@@ -32,10 +33,12 @@ app.use("/api/progress", progressRoutes);
 app.use("/api/admin", adminRoutes);
 
 //for server testing.....
-app.get("/",(req,res)=>{
-    res.send("welcome to clab to pro server runs successfully")
+app.get("/", (req, res) => {
+    res.send("welcome to clab to pro server runs successfully");
 });
+
 //for server...
-app.listen(process.env.PORT,()=>{
-    console.log("server runs successfully on 3400");
-})
+const PORT = process.env.PORT || 3400;
+app.listen(PORT, () => {
+    console.log(`server runs successfully on ${PORT}`);
+});

@@ -19,6 +19,11 @@ const submissionSchema = new mongoose.Schema(
       required: true,
     },
 
+    codeHash: {
+      type: String,
+      index: true,
+    },
+
     language: {
       type: String,
       enum: ["c"],
@@ -50,6 +55,59 @@ const submissionSchema = new mongoose.Schema(
 
     executionTime: {
       type: Number,
+    },
+
+    aiEvaluation: {
+      overallStatus: {
+        type: String,
+        enum: [
+          "likely_correct",
+          "likely_incorrect",
+          "needs_verification",
+          "evaluation_unavailable",
+        ],
+      },
+      confidence: {
+        type: Number,
+        min: 0,
+        max: 100,
+      },
+      summary: {
+        type: String,
+      },
+      testCaseAnalysis: [
+        {
+          testCaseNumber: Number,
+          prediction: {
+            type: String,
+            enum: ["likely_pass", "likely_fail", "uncertain"],
+          },
+          reason: String,
+        },
+      ],
+      detectedIssues: [
+        {
+          type: {
+            type: String,
+          },
+          severity: String,
+          message: String,
+        },
+      ],
+      edgeCases: [String],
+      timeComplexity: String,
+      spaceComplexity: String,
+      concepts: [String],
+      suggestions: [String],
+      learningFeedback: String,
+      verificationRequired: {
+        type: Boolean,
+        default: true,
+      },
+    },
+
+    aiEvaluatedAt: {
+      type: Date,
     },
 
     submittedAt: {

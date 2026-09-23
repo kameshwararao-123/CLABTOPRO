@@ -1,3 +1,5 @@
+import { CheckCircle } from "lucide-react";
+
 const ProblemDescription = ({ problem }) => {
   return (
     <div className="space-y-7">
@@ -7,13 +9,20 @@ const ProblemDescription = ({ problem }) => {
           {problem.title}
         </h1>
 
-        <div className="mt-3 flex gap-2">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {problem.isSolved && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700 border border-emerald-200">
+              <CheckCircle size={13} />
+              Solved
+            </span>
+          )}
+
           <span className="rounded-full bg-green-50 px-3 py-1 text-xs font-medium text-green-600">
             {problem.difficulty}
           </span>
 
           <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-600">
-            {problem.topic?.name}
+            {problem.topic?.name || problem.topic || "Basics"}
           </span>
         </div>
       </div>
@@ -64,38 +73,27 @@ const ProblemDescription = ({ problem }) => {
         </section>
       )}
 
-      {problem.testCases?.filter((test) => test.isSample).length > 0 && (
+      {problem.sampleInput && (
         <section>
-          <h2 className="mb-3 text-lg font-bold text-slate-800">
-            Examples
+          <h2 className="mb-2 text-lg font-bold text-slate-800">
+            Sample Input
           </h2>
 
-          <div className="space-y-3">
-            {problem.testCases
-              .filter((test) => test.isSample)
-              .map((test, index) => (
-                <div
-                  key={index}
-                  className="rounded-xl bg-slate-900 p-4 font-mono text-sm text-slate-200"
-                >
-                  <p>
-                    Input:
-                  </p>
+          <pre className="rounded-xl bg-slate-900 p-4 font-mono text-sm text-green-400 overflow-x-auto">
+            {problem.sampleInput}
+          </pre>
+        </section>
+      )}
 
-                  <pre className="mb-3 mt-1">
-                    {test.input}
-                  </pre>
+      {problem.sampleOutput && (
+        <section>
+          <h2 className="mb-2 text-lg font-bold text-slate-800">
+            Sample Output
+          </h2>
 
-                  <p>
-                    Output:
-                  </p>
-
-                  <pre className="mt-1">
-                    {test.output}
-                  </pre>
-                </div>
-              ))}
-          </div>
+          <pre className="rounded-xl bg-slate-900 p-4 font-mono text-sm text-green-400 overflow-x-auto">
+            {problem.sampleOutput}
+          </pre>
         </section>
       )}
 
