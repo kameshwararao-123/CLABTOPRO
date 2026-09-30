@@ -1,5 +1,46 @@
 import mongoose from "mongoose";
 
+const testCaseResultSchema = new mongoose.Schema(
+  {
+    testCaseNumber: {
+      type: Number,
+      required: true,
+    },
+    status: {
+      type: String,
+      enum: ["passed", "failed", "compile_error", "runtime_error", "time_limit", "skipped"],
+      required: true,
+    },
+    executionTime: {
+      type: Number,
+      default: 0,
+    },
+    error: {
+      type: String,
+      default: "",
+    },
+    isHidden: {
+      type: Boolean,
+      default: false,
+    },
+    // Raw outputs are recorded in database for instructor review,
+    // but sanitized before sending to students for hidden test cases.
+    input: {
+      type: String,
+      default: "",
+    },
+    expectedOutput: {
+      type: String,
+      default: "",
+    },
+    actualOutput: {
+      type: String,
+      default: "",
+    },
+  },
+  { _id: false }
+);
+
 const submissionSchema = new mongoose.Schema(
   {
     user: {
@@ -53,38 +94,32 @@ const submissionSchema = new mongoose.Schema(
       default: 0,
     },
 
-    executionTime: {
+    tabSwitches: {
       type: Number,
+      default: 0,
     },
 
+    executionTime: {
+      type: Number,
+      default: 0,
+    },
+
+    compilerOutput: {
+      type: String,
+      default: "",
+    },
+
+    testCaseResults: {
+      type: [testCaseResultSchema],
+      default: [],
+    },
+
+    // AI is used solely as an educational assistant and never decides verdicts
     aiEvaluation: {
-      overallStatus: {
-        type: String,
-        enum: [
-          "likely_correct",
-          "likely_incorrect",
-          "needs_verification",
-          "evaluation_unavailable",
-        ],
-      },
-      confidence: {
-        type: Number,
-        min: 0,
-        max: 100,
-      },
       summary: {
         type: String,
+        default: "",
       },
-      testCaseAnalysis: [
-        {
-          testCaseNumber: Number,
-          prediction: {
-            type: String,
-            enum: ["likely_pass", "likely_fail", "uncertain"],
-          },
-          reason: String,
-        },
-      ],
       detectedIssues: [
         {
           type: {
@@ -94,16 +129,9 @@ const submissionSchema = new mongoose.Schema(
           message: String,
         },
       ],
-      edgeCases: [String],
-      timeComplexity: String,
-      spaceComplexity: String,
-      concepts: [String],
       suggestions: [String],
+      concepts: [String],
       learningFeedback: String,
-      verificationRequired: {
-        type: Boolean,
-        default: true,
-      },
     },
 
     aiEvaluatedAt: {
@@ -119,6 +147,44 @@ const submissionSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+/**
+ * Strips secret inputs, expected outputs, and actual outputs for hidden test cases
+ * before returning submission objects to students.
+ */
+export const sanitizeSubmissionForStudent = (submission) => {
+  if (!submission) return null;
+  const subObj = submission.toObject ? submission.toObject() : { ...submission };
+
+  if (Array.isArray(subObj.testCaseResults)) {
+    subObj.testCases = subObj.testCaseResults.map((tc) => {
+      if (tc.isHidden) {
+        return {
+          testCaseNumber: tc.testCaseNumber,
+          status: tc.status,
+          executionTime: tc.executionTime,
+          isHidden: true,
+          // Securely omitted for student privacy/assessment integrity:
+          // input, expectedOutput, actualOutput
+        };
+      }
+      return {
+        testCaseNumber: tc.testCaseNumber,
+        status: tc.status,
+        executionTime: tc.executionTime,
+        isHidden: false,
+        input: tc.input,
+        expectedOutput: tc.expectedOutput,
+        actualOutput: tc.actualOutput,
+        error: tc.error,
+      };
+    });
+    // Remove internal raw array to avoid leaking hidden outputs
+    delete subObj.testCaseResults;
+  }
+
+  return subObj;
+};
 
 const Submission = mongoose.model("Submission", submissionSchema);
 

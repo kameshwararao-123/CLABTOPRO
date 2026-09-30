@@ -23,15 +23,24 @@ const Dashboard = () => {
   useEffect(() => {
     const loadDashboard = async () => {
       try {
-        const [progressData, problemData] = await Promise.all([
+        const [progressResult, problemResult] = await Promise.allSettled([
           getMyProgress(),
           getTodayProblem(),
         ]);
 
-        setProgress(progressData.progress);
-        setProblem(problemData.problem);
+        if (progressResult.status === "fulfilled" && progressResult.value?.progress) {
+          setProgress(progressResult.value.progress);
+        } else if (progressResult.status === "rejected") {
+          console.warn("Could not load student progress:", progressResult.reason);
+        }
+
+        if (problemResult.status === "fulfilled" && problemResult.value?.problem) {
+          setProblem(problemResult.value.problem);
+        } else {
+          setProblem(null);
+        }
       } catch (error) {
-        console.error(error);
+        console.error("Dashboard error:", error);
       } finally {
         setLoading(false);
       }
@@ -87,7 +96,7 @@ const Dashboard = () => {
 
       </div>
 
-      {problem && (
+      {problem ? (
         <div className="rounded-3xl border border-slate-200 bg-white p-5 sm:p-7 shadow-sm">
 
           <div className="flex flex-col justify-between gap-5 md:flex-row md:items-center">
@@ -148,6 +157,30 @@ const Dashboard = () => {
 
           </div>
 
+        </div>
+      ) : (
+        <div className="rounded-3xl border border-dashed border-slate-200 bg-white p-6 sm:p-8 text-center shadow-xs">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600 mb-3">
+            <Code2 size={24} />
+          </div>
+
+          <h3 className="text-lg font-bold text-slate-800">
+            No Problem of the Day Yet
+          </h3>
+
+          <p className="mt-1.5 text-sm text-slate-500 max-w-md mx-auto">
+            Today's daily challenge has not been published yet. You can still practice and solve problems from the complete problem collection!
+          </p>
+
+          <div className="mt-5">
+            <Link
+              to="/problems"
+              className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 font-semibold text-white shadow-sm hover:bg-indigo-700 transition text-sm"
+            >
+              Explore All Problems
+              <ArrowRight size={16} />
+            </Link>
+          </div>
         </div>
       )}
 

@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  # Isolated Piston execution engine (Docker sandbox)
+  piston:
+    image: ghcr.io/engineer-man/piston:latest
+    container_name: clabto-piston
+    restart: unless-stopped
+    ports:
+      - "2000:2000"
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1024M
+
+  # Node.js backend judge API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: clabto-backend
+    restart: unless-stopped
+    ports:
+      - "3400:3400"
+    environment:
+      - PORT=3400
+      - PISTON_URL=http://piston:2000
+      - ENABLE_LOCAL_GCC_FALLBACK=true
+      - EXECUTION_CONCURRENCY=4
+      - EXECUTION_TIMEOUT_MS=5000
+    env_file:
+      - ./backend/.env
+    depends_on:
+      - piston

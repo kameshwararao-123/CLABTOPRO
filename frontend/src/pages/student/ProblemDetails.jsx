@@ -10,7 +10,8 @@ import StreakCelebrationModal from "../../components/problem/StreakCelebrationMo
 
 import { getProblemById } from "../../services/problemService";
 import { submitCode, getMySubmissions } from "../../services/submissionService";
-import { CheckCircle2 } from "lucide-react";
+import { CheckCircle2, Loader2 } from "lucide-react";
+import { useRestriction } from "../../context/RestrictionContext";
 
 const DEFAULT_BOILERPLATE = `#include <stdio.h>
 
@@ -21,6 +22,7 @@ int main() {
 
 const ProblemDetails = () => {
   const { id } = useParams();
+  const { switchCount } = useRestriction();
 
   const [problem, setProblem] = useState(null);
   const [code, setCode] = useState(DEFAULT_BOILERPLATE);
@@ -45,8 +47,8 @@ const ProblemDetails = () => {
             setCode(data.lastSubmission.code);
             setHasPreviousSubmission(true);
           }
-          if (data.lastSubmission.aiEvaluation) {
-            setEvaluationResult(data.lastSubmission.aiEvaluation);
+          if (data.lastSubmission.aiEvaluation || data.lastSubmission.status) {
+            setEvaluationResult(data.lastSubmission);
           }
           if (data.lastSubmission.allPassed !== undefined) {
             setAllPassed(data.lastSubmission.allPassed);
@@ -65,9 +67,7 @@ const ProblemDetails = () => {
             if (matchingSub && matchingSub.code) {
               setCode(matchingSub.code);
               setHasPreviousSubmission(true);
-              if (matchingSub.aiEvaluation) {
-                setEvaluationResult(matchingSub.aiEvaluation);
-              }
+              setEvaluationResult(matchingSub);
               setAllPassed(matchingSub.status === "accepted");
             }
           } catch (subErr) {
@@ -95,11 +95,11 @@ const ProblemDetails = () => {
         problemId: id,
         code,
         language: "c",
+        tabSwitches: switchCount || 0,
       });
 
-      if (data.aiEvaluation) {
-        setEvaluationResult(data.aiEvaluation);
-      }
+      // Deterministic judge result
+      setEvaluationResult(data);
 
       if (data.allPassed !== undefined) {
         setAllPassed(data.allPassed);
@@ -116,10 +116,10 @@ const ProblemDetails = () => {
 
       setMessage(data.message || "");
     } catch (error) {
-      setMessage(
+      const errMsg =
         error.response?.data?.message ||
-          "Submission failed. Please try again."
-      );
+        "Submission failed. Please verify that the execution service is running.";
+      setMessage(errMsg);
     } finally {
       setSubmitting(false);
     }
@@ -145,7 +145,7 @@ const ProblemDetails = () => {
           <ProblemDescription problem={problem} />
         </div>
 
-        {/* Code Editor & AI Evaluation */}
+        {/* Code Editor & Execution Results */}
         <div className="space-y-4">
           {hasPreviousSubmission && (
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-xl bg-emerald-50 border border-emerald-200 px-4 py-3 text-xs text-emerald-800">
@@ -190,20 +190,44 @@ const ProblemDetails = () => {
             disabled={submitting || !code.trim()}
             className="w-full"
           >
-            {submitting
-              ? "Analyzing..."
-              : hasPreviousSubmission
-              ? "Re-submit Code"
-              : "Submit Code"}
+            {submitting ? (
+              <span className="flex items-center justify-center gap-2">
+                <Loader2 size={16} className="animate-spin" />
+                Running your code...
+              </span>
+            ) : hasPreviousSubmission ? (
+              "Re-submit Code"
+            ) : (
+              "Submit Code"
+            )}
           </Button>
 
-          {/* AI Static Evaluation Result */}
+          {/* Real-time Execution Banner when judging */}
+          {submitting && (
+            <div className="flex items-center justify-center gap-2.5 rounded-2xl bg-indigo-50 border border-indigo-200/80 p-3.5 text-xs font-semibold text-indigo-800 animate-pulse">
+              <Loader2 size={16} className="animate-spin text-indigo-600 shrink-0" />
+              <span>Compiling and executing test cases in sandbox...</span>
+            </div>
+          )}
+
+          {/* Deterministic Judge & AI Explanation Result */}
           {evaluationResult && (
             <div className="mt-4">
               <AIEvaluationResult
                 evaluation={evaluationResult}
                 allPassed={allPassed}
                 progress={progress}
+                totalTestCases={
+                  evaluationResult.totalTestCases ??
+                  problem?.testCases?.length ??
+                  evaluationResult.testCases?.length ??
+                  0
+                }
+                testCasesPassed={
+                  evaluationResult.testCasesPassed ??
+                  evaluationResult.testCases?.filter((tc) => tc.status === "passed").length ??
+                  0
+                }
               />
             </div>
           )}

@@ -1,0 +1,25 @@
+services:
+  piston:
+    image: ghcr.io/engineer-man/piston:latest
+    container_name: clab-piston
+    restart: unless-stopped
+    ports:
+      - "2000:2000"
+    environment:
+      - PISTON_BIND_ADDRESS=0.0.0.0:2000
+    tmpfs:
+      - /tmp:exec,mode=1777
+    volumes:
+      - piston_packages:/piston/packages
+    # Security and isolation limits
+    pids_limit: 120
+    mem_limit: 1024m
+    cpus: 2.0
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_ADMIN
+
+volumes:
+  piston_packages:
+    name: clab_piston_packages

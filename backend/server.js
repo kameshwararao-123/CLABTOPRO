@@ -11,6 +11,7 @@ import problemRoutes from "./routes/problemRoutes.js";
 import submissionRoutes from "./routes/submissionRoutes.js";
 import progressRoutes from "./routes/progressRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
+import executionRoutes from "./routes/executionRoutes.js";
 
 const app = express();
 
@@ -31,6 +32,8 @@ app.use("/api/submissions", submissionRoutes);
 app.use("/api/progress", progressRoutes);
 
 app.use("/api/admin", adminRoutes);
+
+app.use("/api/execution", executionRoutes);
 
 //for server testing.....
 app.get("/", (req, res) => {

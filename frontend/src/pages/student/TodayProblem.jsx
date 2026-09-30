@@ -15,7 +15,13 @@ const TodayProblem = () => {
     const loadProblem = async () => {
       try {
         const data = await getTodayProblem();
-        setProblem(data.problem);
+        if (data.problem) {
+          setProblem(data.problem);
+        } else {
+          setError(
+            data.message || "Today's problem has not been published yet."
+          );
+        }
       } catch (error) {
         setError(
           error.response?.data?.message ||

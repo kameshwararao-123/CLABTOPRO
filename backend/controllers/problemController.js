@@ -1,5 +1,6 @@
 import Problem from "../models/Problem.js";
-import Submission from "../models/Submission.js";
+import Submission, { sanitizeSubmissionForStudent } from "../models/Submission.js";
+
 
 
 // ================= CREATE PROBLEM =================
@@ -70,8 +71,9 @@ export const getTodayProblem = async (req, res) => {
     }).populate("createdBy", "username email");
 
     if (!problem) {
-      return res.status(404).json({
+      return res.status(200).json({
         message: "Today's problem has not been published yet",
+        problem: null,
       });
     }
 
@@ -103,12 +105,8 @@ export const getTodayProblem = async (req, res) => {
       },
       lastSubmission: lastSubmission
         ? {
-            _id: lastSubmission._id,
-            code: lastSubmission.code,
-            status: lastSubmission.status,
+            ...sanitizeSubmissionForStudent(lastSubmission),
             allPassed: lastSubmission.status === "accepted",
-            aiEvaluation: lastSubmission.aiEvaluation,
-            submittedAt: lastSubmission.submittedAt || lastSubmission.createdAt,
           }
         : null,
     });
@@ -205,12 +203,8 @@ export const getProblemById = async (req, res) => {
       },
       lastSubmission: lastSubmission
         ? {
-            _id: lastSubmission._id,
-            code: lastSubmission.code,
-            status: lastSubmission.status,
+            ...sanitizeSubmissionForStudent(lastSubmission),
             allPassed: lastSubmission.status === "accepted",
-            aiEvaluation: lastSubmission.aiEvaluation,
-            submittedAt: lastSubmission.submittedAt || lastSubmission.createdAt,
           }
         : null,
     });

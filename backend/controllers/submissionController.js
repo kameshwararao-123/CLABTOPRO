@@ -1,17 +1,19 @@
 import crypto from "crypto";
 import mongoose from "mongoose";
-import Submission from "../models/Submission.js";
+import Submission, { sanitizeSubmissionForStudent } from "../models/Submission.js";
 import Problem from "../models/Problem.js";
 import Progress from "../models/Progress.js";
 import User from "../models/User.js";
-import { evaluateCodeWithAI } from "../services/aiEvaluationService.js";
+import { judgeSubmission, ExecutionServiceError } from "../services/judgeService.js";
+import { explainFailureWithAI } from "../services/aiEvaluationService.js";
+import submissionQueue from "../services/submissionQueue.js";
 
 // In-memory cooldown tracking (2 seconds per user)
 const userLastSubmission = new Map();
 
 /**
  * Updates student Progress and User streak/accuracy metrics.
- * Reliably calculates unique problems solved, accepted submissions, total attempts, and daily streak.
+ * Accurately tracks unique problems solved, accepted submissions, total attempts, and daily streak.
  */
 const updateStudentProgress = async (userId, problemId, allPassed) => {
   try {
@@ -20,7 +22,7 @@ const updateStudentProgress = async (userId, problemId, allPassed) => {
       progress = await Progress.create({ user: userId });
     }
 
-    // 1. Accurately count unique solved problems from accepted submissions
+    // 1. Unique solved problems from accepted submissions
     const solvedProblems = await Submission.distinct("problem", {
       user: userId,
       status: "accepted",
@@ -40,12 +42,10 @@ const updateStudentProgress = async (userId, problemId, allPassed) => {
     });
 
     if (allPassed) {
-      // 4. Daily streak calculation based on calendar date (YYYY-MM-DD)
       const now = new Date();
       const todayStr = now.toISOString().slice(0, 10);
 
       if (!progress.lastSolvedDate) {
-        // First solve ever!
         progress.currentStreak = 1;
         progress.longestStreak = Math.max(progress.longestStreak || 0, 1);
         progress.lastSolvedDate = now;
@@ -55,7 +55,6 @@ const updateStudentProgress = async (userId, problemId, allPassed) => {
           .slice(0, 10);
 
         if (lastSolvedStr === todayStr) {
-          // Already solved today, ensure streak is at least 1 and keep going
           if (!progress.currentStreak || progress.currentStreak < 1) {
             progress.currentStreak = 1;
           }
@@ -66,10 +65,8 @@ const updateStudentProgress = async (userId, problemId, allPassed) => {
           const yesterdayStr = yesterday.toISOString().slice(0, 10);
 
           if (lastSolvedStr === yesterdayStr) {
-            // Consecutive day: increment streak
             progress.currentStreak = (progress.currentStreak || 0) + 1;
           } else {
-            // Missed a day or more: reset streak to 1
             progress.currentStreak = 1;
           }
 
@@ -81,7 +78,6 @@ const updateStudentProgress = async (userId, problemId, allPassed) => {
         }
       }
 
-      // Sync User model with updated streak
       await User.findByIdAndUpdate(userId, {
         currentStreak: progress.currentStreak,
         longestStreak: progress.longestStreak,
@@ -92,7 +88,7 @@ const updateStudentProgress = async (userId, problemId, allPassed) => {
     await progress.save();
     return progress;
   } catch (err) {
-    console.error("[UPDATE PROGRESS ERROR]:", err.message);
+    console.error("[UpdateProgress] Error syncing student metrics:", err.message);
     return null;
   }
 };
@@ -105,21 +101,19 @@ export const submitCode = async (req, res) => {
 
     // 1. Validation
     if (!problemId) {
-      return res.status(400).json({
-        message: "Problem ID is required",
-      });
+      return res.status(400).json({ message: "Problem ID is required" });
     }
 
     if (!mongoose.Types.ObjectId.isValid(problemId)) {
-      return res.status(400).json({
-        message: "Invalid Problem ID format",
-      });
+      return res.status(400).json({ message: "Invalid Problem ID format" });
     }
 
     if (!code || typeof code !== "string" || !code.trim()) {
-      return res.status(400).json({
-        message: "Code cannot be empty",
-      });
+      return res.status(400).json({ message: "Code cannot be empty" });
+    }
+
+    if (code.length > 65536) {
+      return res.status(400).json({ message: "Code exceeds maximum size of 64KB" });
     }
 
     // Rate limit per user (2-second cooldown)
@@ -128,28 +122,24 @@ export const submitCode = async (req, res) => {
       const lastTime = userLastSubmission.get(userId.toString());
       if (lastTime && Date.now() - lastTime < 2000) {
         return res.status(429).json({
-          message: "Please wait a moment before submitting again.",
+          message: "Please wait 2 seconds before submitting again.",
         });
       }
       userLastSubmission.set(userId.toString(), Date.now());
     }
 
-    // 2. Check problem existence
+    // 2. Fetch problem and test cases
     const problem = await Problem.findById(problemId);
     if (!problem) {
-      return res.status(404).json({
-        message: "Problem not found",
-      });
+      return res.status(404).json({ message: "Problem not found" });
     }
 
-    // 3. Generate codeHash for evaluation deduplication
-    const normalizedCode = code.trim();
     const codeHash = crypto
       .createHash("sha256")
-      .update(`${problemId}:${normalizedCode}`)
+      .update(`${problemId}:${code.trim()}`)
       .digest("hex");
 
-    // 4. Save submission ALWAYS before AI evaluation
+    // 3. Pre-create submission in MongoDB
     const submission = await Submission.create({
       user: req.user.userId,
       problem: problemId,
@@ -157,159 +147,140 @@ export const submitCode = async (req, res) => {
       language: "c",
       status: "pending",
       totalTestCases: problem.testCases?.length || 0,
+      tabSwitches: Number(req.body.tabSwitches || 0),
       codeHash,
       submittedAt: new Date(),
     });
 
-    // 5. Check for cached evaluation for identical problem + code
-    const cachedSubmission = await Submission.findOne({
-      problem: problemId,
-      codeHash,
-      "aiEvaluation.overallStatus": {
-        $in: ["likely_correct", "likely_incorrect", "needs_verification"],
-      },
-      _id: { $ne: submission._id },
-    }).sort({ createdAt: -1 });
-
-    if (cachedSubmission && cachedSubmission.aiEvaluation) {
-      submission.aiEvaluation = cachedSubmission.aiEvaluation;
-      submission.aiEvaluatedAt = new Date();
-
-      const totalCases =
-        problem.testCases?.length ||
-        submission.aiEvaluation.testCaseAnalysis?.length ||
-        0;
-      const passedCount = (
-        submission.aiEvaluation.testCaseAnalysis || []
-      ).filter((tc) => tc.prediction === "likely_pass").length;
-
-      const allPassed =
-        submission.aiEvaluation.overallStatus === "likely_correct" ||
-        (totalCases > 0 && passedCount === totalCases);
-
-      if (allPassed) {
-        submission.status = "accepted";
-        submission.testCasesPassed = totalCases;
-      } else {
-        submission.status = "wrong_answer";
-        submission.testCasesPassed = passedCount;
-      }
-
-      await submission.save();
-
-      // Update student dashboard, streak, and problems solved count
-      const progress = await updateStudentProgress(
-        req.user.userId,
-        problemId,
-        allPassed
-      );
-
-      return res.status(201).json({
-        message: allPassed
-          ? "All test cases passed! Streak and dashboard updated."
-          : "Code evaluated. Some test cases failed.",
-        submissionId: submission._id,
-        status: submission.status,
-        allPassed,
-        aiEvaluation: submission.aiEvaluation,
-        progress,
-      });
-    }
-
-    // 6. Perform AI Static Evaluation via Gemini Service
-    const aiResult = await evaluateCodeWithAI({
-      problem,
-      studentCode: code,
-    });
-
-    if (aiResult && aiResult.success) {
-      const { success, ...cleanEvaluation } = aiResult;
-
-      const totalCases =
-        problem.testCases?.length ||
-        cleanEvaluation.testCaseAnalysis?.length ||
-        0;
-
-      // Calculate likely passed test cases count
-      const passedCount = (cleanEvaluation.testCaseAnalysis || []).filter(
-        (tc) => tc.prediction === "likely_pass"
-      ).length;
-
-      const allPassed =
-        cleanEvaluation.overallStatus === "likely_correct" ||
-        (totalCases > 0 && passedCount === totalCases);
-
-      if (allPassed) {
-        submission.status = "accepted";
-        submission.testCasesPassed = totalCases;
-      } else {
-        submission.status = "wrong_answer";
-        submission.testCasesPassed = passedCount;
-      }
-
-      submission.aiEvaluation = cleanEvaluation;
-      submission.aiEvaluatedAt = new Date();
-      await submission.save();
-
-      // Update student dashboard, streak, and problems solved count
-      const progress = await updateStudentProgress(
-        req.user.userId,
-        problemId,
-        allPassed
-      );
-
-      return res.status(201).json({
-        message: allPassed
-          ? "All test cases passed! Streak and dashboard updated."
-          : "Code evaluated. Some test cases failed.",
-        submissionId: submission._id,
-        status: submission.status,
-        allPassed,
-        aiEvaluation: submission.aiEvaluation,
-        progress,
-      });
-    }
-
-    // 7. Fallback if AI Evaluation is unavailable (submission is kept safely)
-    submission.aiEvaluation = {
-      overallStatus: "evaluation_unavailable",
-      confidence: 0,
-      summary:
-        "Your code was submitted successfully, but AI evaluation is temporarily unavailable.",
-      testCaseAnalysis: [],
-      detectedIssues: [],
-      edgeCases: [],
-      timeComplexity: "Unknown",
-      spaceComplexity: "Unknown",
-      concepts: [],
-      suggestions: [
-        "Check back later or review your logic against problem constraints manually.",
-      ],
-      learningFeedback:
-        "The submission was recorded. AI analysis could not be completed at this time.",
-      verificationRequired: true,
-    };
-    submission.aiEvaluatedAt = new Date();
-    await submission.save();
-
-    const progress = await updateStudentProgress(
-      req.user.userId,
-      problemId,
-      false
+    console.log(
+      `[Submission] Created submission ${submission._id} for user ${req.user.userId} on problem "${problem.title}". Queuing...`
     );
 
+    // 4. Enqueue execution through the concurrency-controlled queue
+    const executionTask = async () => {
+      // A. Deterministic Judgment through Piston
+      const judgeResult = await judgeSubmission({
+        code,
+        testCases: problem.testCases || [],
+        problemTitle: problem.title,
+      });
+
+      submission.status = judgeResult.status;
+      submission.compilerOutput = judgeResult.compilerOutput || "";
+      submission.testCasesPassed = judgeResult.testCasesPassed || 0;
+      submission.totalTestCases = judgeResult.totalTestCases || 0;
+      submission.executionTime = judgeResult.executionTime || 0;
+      submission.testCaseResults = judgeResult.testCaseResults || [];
+
+      // B. Optional AI Learning Assistant (Failure explanation & hints)
+      const allPassed = judgeResult.status === "accepted";
+
+      if (!allPassed) {
+        const firstFailedTest = judgeResult.testCaseResults.find(
+          (tc) => tc.status !== "passed" && tc.status !== "skipped"
+        );
+
+        const explanation = await explainFailureWithAI({
+          problem,
+          studentCode: code,
+          verdict: judgeResult.status,
+          executionEvidence: {
+            testCaseNumber: firstFailedTest?.testCaseNumber,
+            isHidden: firstFailedTest?.isHidden,
+            expectedOutput: firstFailedTest?.expectedOutput,
+            actualOutput: firstFailedTest?.actualOutput,
+            compilerError: judgeResult.compilerOutput,
+            runtimeError: firstFailedTest?.error,
+          },
+        });
+
+        submission.aiEvaluation = explanation;
+        submission.aiEvaluatedAt = new Date();
+      } else {
+        submission.aiEvaluation = {
+          summary: "All test cases passed! Clean implementation.",
+          detectedIssues: [],
+          suggestions: ["Great job! You can explore alternative algorithmic approaches to further optimize time complexity."],
+          concepts: [problem.topic || "C Basics"],
+          learningFeedback: "Excellent work! Your code successfully handled all test cases.",
+        };
+        submission.aiEvaluatedAt = new Date();
+      }
+
+      await submission.save();
+
+      // C. Update student progress metrics
+      const progress = await updateStudentProgress(
+        req.user.userId,
+        problemId,
+        allPassed
+      );
+
+      return {
+        submission,
+        progress,
+        allPassed,
+      };
+    };
+
+    let result;
+    try {
+      result = await submissionQueue.enqueue(executionTask, {
+        userId: req.user.userId,
+        problemId,
+        submissionId: submission._id,
+      });
+    } catch (queueErr) {
+      // If Piston is unavailable or queue overloaded, handle gracefully
+      if (queueErr instanceof ExecutionServiceError) {
+        console.error(`[Submission Error] Execution service failure for ${submission._id}:`, queueErr.message);
+        // Do NOT mark as wrong_answer! Keep as pending or remove
+        await Submission.findByIdAndDelete(submission._id).catch(() => {});
+        return res.status(503).json({
+          message: queueErr.message,
+          retryable: true,
+        });
+      }
+
+      if (queueErr.code === "QUEUE_OVERLOAD") {
+        await Submission.findByIdAndDelete(submission._id).catch(() => {});
+        return res.status(503).json({
+          message: queueErr.message,
+          retryable: true,
+        });
+      }
+
+      throw queueErr;
+    }
+
+    // 5. Sanitize submission for student response (never reveal hidden inputs/outputs)
+    const sanitizedSubmission = sanitizeSubmissionForStudent(result.submission);
+
+    const messageMap = {
+      accepted: "✓ Accepted! All test cases passed.",
+      wrong_answer: "✗ Wrong Answer. Some test cases failed.",
+      compile_error: "✗ Compilation Error. Check compiler output.",
+      runtime_error: "✗ Runtime Error occurred during execution.",
+      time_limit: "✗ Time Limit Exceeded. Program took too long to finish.",
+    };
+
     return res.status(201).json({
-      message: "Submission saved, but AI evaluation is currently unavailable.",
-      submissionId: submission._id,
-      status: submission.status,
-      allPassed: false,
-      aiEvaluation: submission.aiEvaluation,
-      progress,
+      message: messageMap[sanitizedSubmission.status] || "Submission evaluated.",
+      submissionId: sanitizedSubmission._id,
+      status: sanitizedSubmission.status,
+      allPassed: result.allPassed,
+      testCasesPassed: sanitizedSubmission.testCasesPassed,
+      totalTestCases: sanitizedSubmission.totalTestCases,
+      executionTime: sanitizedSubmission.executionTime,
+      compilerOutput: sanitizedSubmission.compilerOutput,
+      testCases: sanitizedSubmission.testCases,
+      aiEvaluation: sanitizedSubmission.aiEvaluation,
+      progress: result.progress,
     });
   } catch (error) {
     console.error("[SUBMIT CODE ERROR]:", error);
     res.status(500).json({
-      message: error.message || "Submission failed",
+      message: error.message || "An unexpected error occurred during submission evaluation.",
     });
   }
 };
@@ -321,11 +292,13 @@ export const getMySubmissions = async (req, res) => {
     const submissions = await Submission.find({
       user: req.user.userId,
     })
-      .populate("problem", "title difficulty")
+      .populate("problem", "title difficulty topic")
       .sort({ createdAt: -1 });
 
+    const sanitized = submissions.map((s) => sanitizeSubmissionForStudent(s));
+
     res.status(200).json({
-      submissions,
+      submissions: sanitized,
     });
   } catch (error) {
     console.error("[GET MY SUBMISSIONS ERROR]:", error);
@@ -348,7 +321,7 @@ export const getSubmissionById = async (req, res) => {
     const submission = await Submission.findOne({
       _id: req.params.id,
       user: req.user.userId,
-    }).populate("problem");
+    }).populate("problem", "title difficulty description topic");
 
     if (!submission) {
       return res.status(404).json({
@@ -357,7 +330,7 @@ export const getSubmissionById = async (req, res) => {
     }
 
     res.status(200).json({
-      submission,
+      submission: sanitizeSubmissionForStudent(submission),
     });
   } catch (error) {
     console.error("[GET SUBMISSION BY ID ERROR]:", error);
