@@ -4,12 +4,15 @@ import Submission, { sanitizeSubmissionForStudent } from "../models/Submission.j
 import Problem from "../models/Problem.js";
 import Progress from "../models/Progress.js";
 import User from "../models/User.js";
-import { judgeSubmission, ExecutionServiceError } from "../services/judgeService.js";
+import { judgeSubmission, runCCode, ExecutionServiceError } from "../services/judgeService.js";
+import { parseGccDiagnostics } from "../utils/compilerParser.js";
 import { explainFailureWithAI } from "../services/aiEvaluationService.js";
 import submissionQueue from "../services/submissionQueue.js";
+import { updateStudentLeaderboardAfterSubmission } from "../services/leaderboardService.js";
 
-// In-memory cooldown tracking (2 seconds per user)
+// In-memory cooldown tracking (2 seconds per user for submit, 1 second for run)
 const userLastSubmission = new Map();
+const userLastRun = new Map();
 
 /**
  * Updates student Progress and User streak/accuracy metrics.
@@ -216,6 +219,16 @@ export const submitCode = async (req, res) => {
         allPassed
       );
 
+      // D. Dynamically update unified leaderboard metrics & rankings
+      try {
+        await updateStudentLeaderboardAfterSubmission({
+          userId: req.user.userId,
+          submissionId: submission._id,
+        });
+      } catch (lbError) {
+        console.error("[LEADERBOARD UPDATE ERROR]:", lbError.message);
+      }
+
       return {
         submission,
         progress,
@@ -264,6 +277,8 @@ export const submitCode = async (req, res) => {
       time_limit: "✗ Time Limit Exceeded. Program took too long to finish.",
     };
 
+    const diagnostics = parseGccDiagnostics(sanitizedSubmission.compilerOutput);
+
     return res.status(201).json({
       message: messageMap[sanitizedSubmission.status] || "Submission evaluated.",
       submissionId: sanitizedSubmission._id,
@@ -273,6 +288,7 @@ export const submitCode = async (req, res) => {
       totalTestCases: sanitizedSubmission.totalTestCases,
       executionTime: sanitizedSubmission.executionTime,
       compilerOutput: sanitizedSubmission.compilerOutput,
+      diagnostics,
       testCases: sanitizedSubmission.testCases,
       aiEvaluation: sanitizedSubmission.aiEvaluation,
       progress: result.progress,
@@ -285,21 +301,139 @@ export const submitCode = async (req, res) => {
   }
 };
 
+// ================= RUN CODE (NO SUBMISSION / NO PROGRESS CHANGE) =================
+
+export const runCode = async (req, res) => {
+  try {
+    const {
+      problemId,
+      code,
+      customInput = "",
+      customExpectedOutput = "",
+      mode = "sample",
+    } = req.body;
+
+    if (!code || typeof code !== "string" || !code.trim()) {
+      return res.status(400).json({ message: "Code cannot be empty" });
+    }
+
+    if (code.length > 65536) {
+      return res.status(400).json({ message: "Code exceeds maximum size of 64KB" });
+    }
+
+    if (typeof customInput === "string" && customInput.length > 65536) {
+      return res.status(400).json({ message: "Custom input exceeds maximum size of 64KB" });
+    }
+
+    if (typeof customExpectedOutput === "string" && customExpectedOutput.length > 65536) {
+      return res.status(400).json({ message: "Expected output exceeds maximum size of 64KB" });
+    }
+
+    const userId = req.user?.userId;
+    if (userId) {
+      const lastRunTime = userLastRun.get(userId.toString());
+      if (lastRunTime && Date.now() - lastRunTime < 1000) {
+        return res.status(429).json({
+          message: "Please wait a moment before running again.",
+        });
+      }
+      userLastRun.set(userId.toString(), Date.now());
+    }
+
+    let problem = null;
+    if (problemId) {
+      if (!mongoose.Types.ObjectId.isValid(problemId)) {
+        return res.status(400).json({ message: "Invalid Problem ID format" });
+      }
+      problem = await Problem.findById(problemId);
+      if (!problem) {
+        return res.status(404).json({ message: "Problem not found" });
+      }
+      if (req.user?.role !== "admin" && problem.status !== "published") {
+        return res.status(403).json({ message: "Access denied" });
+      }
+    }
+
+    const effectiveMode = mode === "custom" || !problem ? "custom" : "sample";
+
+    let runResult;
+    try {
+      runResult = await submissionQueue.enqueue(
+        () =>
+          runCCode({
+            code,
+            mode: effectiveMode,
+            customInput,
+            customExpectedOutput,
+            problem,
+          }),
+        {
+          userId: req.user?.userId,
+          problemId: problemId || "scratch",
+          action: "run",
+        }
+      );
+    } catch (queueErr) {
+      if (queueErr instanceof ExecutionServiceError || queueErr.code === "QUEUE_OVERLOAD") {
+        return res.status(503).json({
+          message: queueErr.message,
+          retryable: true,
+        });
+      }
+      throw queueErr;
+    }
+
+    return res.status(200).json(runResult);
+  } catch (error) {
+    console.error("[RUN CODE ERROR]:", error);
+    return res.status(500).json({
+      message: error.message || "Failed to execute code.",
+    });
+  }
+};
+
 // ================= MY SUBMISSIONS =================
 
 export const getMySubmissions = async (req, res) => {
   try {
-    const submissions = await Submission.find({
-      user: req.user.userId,
-    })
+    const hasPagination =
+      req.query.page !== undefined || req.query.limit !== undefined;
+    const page = Math.max(1, parseInt(req.query.page || "1", 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || "20", 10) || 20));
+    const filter = { user: req.user.userId };
+
+    let query = Submission.find(filter)
+      .select(
+        "problem code language status testCasesPassed totalTestCases executionTime testCaseResults submittedAt createdAt"
+      )
       .populate("problem", "title difficulty topic")
       .sort({ createdAt: -1 });
 
+    if (hasPagination) {
+      query = query.skip((page - 1) * limit).limit(limit);
+    }
+
+    const [submissions, total] = await Promise.all([
+      query.lean(),
+      hasPagination ? Submission.countDocuments(filter) : Promise.resolve(null),
+    ]);
+
     const sanitized = submissions.map((s) => sanitizeSubmissionForStudent(s));
 
-    res.status(200).json({
+    const payload = {
       submissions: sanitized,
-    });
+    };
+
+    if (hasPagination) {
+      payload.pagination = {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      };
+    }
+
+    res.status(200).json(payload);
   } catch (error) {
     console.error("[GET MY SUBMISSIONS ERROR]:", error);
     res.status(500).json({
@@ -321,7 +455,9 @@ export const getSubmissionById = async (req, res) => {
     const submission = await Submission.findOne({
       _id: req.params.id,
       user: req.user.userId,
-    }).populate("problem", "title difficulty description topic");
+    })
+      .populate("problem", "title difficulty description topic")
+      .lean();
 
     if (!submission) {
       return res.status(404).json({

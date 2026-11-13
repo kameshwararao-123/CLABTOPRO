@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
-import { Eye, X, Code } from "lucide-react";
+import { Eye, X, Code, CheckCircle2, XCircle, Lock } from "lucide-react";
 import { getMySubmissions } from "../../services/submissionService";
 import Loader from "../../components/common/Loader";
-import AIEvaluationResult from "../../components/problem/AIEvaluationResult";
 
 const Submissions = () => {
   const [submissions, setSubmissions] = useState([]);
@@ -28,43 +27,6 @@ const Submissions = () => {
     return <Loader />;
   }
 
-  const renderAIStatusBadge = (aiEvaluation) => {
-    if (!aiEvaluation || !aiEvaluation.overallStatus) {
-      return (
-        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-500">
-          Pending Analysis
-        </span>
-      );
-    }
-
-    switch (aiEvaluation.overallStatus) {
-      case "likely_correct":
-        return (
-          <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 border border-emerald-200">
-            ✓ Likely Correct
-          </span>
-        );
-      case "likely_incorrect":
-        return (
-          <span className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700 border border-rose-200">
-            ⚠ Likely Incorrect
-          </span>
-        );
-      case "needs_verification":
-        return (
-          <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700 border border-amber-200">
-            ? Needs Verification
-          </span>
-        );
-      default:
-        return (
-          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
-            Unavailable
-          </span>
-        );
-    }
-  };
-
   return (
     <div className="mx-auto max-w-7xl">
       <h1 className="text-3xl font-bold text-slate-800">My Submissions</h1>
@@ -83,7 +45,6 @@ const Submissions = () => {
               <thead className="border-b bg-slate-50 text-slate-500 text-xs uppercase tracking-wider font-semibold">
                 <tr>
                   <th className="px-6 py-4">Problem</th>
-                  <th className="px-6 py-4">AI Prediction</th>
                   <th className="px-6 py-4">Likely Tests</th>
                   <th className="px-6 py-4">Submitted Date</th>
                   <th className="px-6 py-4 text-right">Details</th>
@@ -107,10 +68,6 @@ const Submissions = () => {
                       </div>
                     </td>
 
-                    <td className="px-6 py-4">
-                      {renderAIStatusBadge(submission.aiEvaluation)}
-                    </td>
-
                     <td className="px-6 py-4 text-slate-600 text-xs">
                       {submission.testCasesPassed || 0} /{" "}
                       {submission.totalTestCases || 0}
@@ -128,7 +85,7 @@ const Submissions = () => {
                         className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200 transition"
                       >
                         <Eye size={14} />
-                        View Feedback
+                        View
                       </button>
                     </td>
                   </tr>
@@ -166,26 +123,168 @@ const Submissions = () => {
               </button>
             </div>
 
+            {/* Test Cases Passed Summary */}
+            {(() => {
+              const passedCount = selectedSubmission.testCasesPassed ?? 0;
+              const totalCount =
+                selectedSubmission.totalTestCases ??
+                selectedSubmission.testCases?.length ??
+                0;
+              const isAccepted =
+                selectedSubmission.status === "accepted" ||
+                (totalCount > 0 && passedCount === totalCount);
+
+              return (
+                <div
+                  className={`mt-5 flex flex-wrap items-center justify-between gap-2 rounded-xl border px-4 py-3 ${
+                    isAccepted
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                      : "border-rose-200 bg-rose-50 text-rose-900"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 text-sm font-bold">
+                    {isAccepted ? (
+                      <CheckCircle2 size={18} className="text-emerald-600 shrink-0" />
+                    ) : (
+                      <XCircle size={18} className="text-rose-600 shrink-0" />
+                    )}
+                    <span>
+                      Test Cases Passed: {passedCount} / {totalCount}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs font-semibold">
+                    {selectedSubmission.executionTime > 0 && (
+                      <span className="opacity-80">
+                        {selectedSubmission.executionTime} ms
+                      </span>
+                    )}
+                    <span className="rounded-full bg-white/80 px-2.5 py-0.5 uppercase text-[11px] border border-current/15">
+                      {(selectedSubmission.status || "evaluated").replaceAll("_", " ")}
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Submitted Code Preview */}
             <div className="mt-5">
               <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
                 <Code size={15} />
                 Submitted Code
               </div>
-              <pre className="rounded-xl bg-slate-950 p-4 font-mono text-xs text-green-300 overflow-x-auto max-h-52">
-                {selectedSubmission.code}
+              <pre className="rounded-xl bg-slate-950 p-4 font-mono text-xs text-green-300 overflow-x-auto max-h-64">
+                {selectedSubmission.code || "// No code recorded"}
               </pre>
             </div>
 
-            {/* AI Evaluation */}
-            <div className="mt-6">
-              {selectedSubmission.aiEvaluation ? (
-                <AIEvaluationResult
-                  evaluation={selectedSubmission.aiEvaluation}
-                />
+            {/* Test Cases Breakdown */}
+            <div className="mt-6 space-y-3">
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Test Cases
+              </div>
+
+              {selectedSubmission.status === "compile_error" &&
+                selectedSubmission.compilerOutput && (
+                  <pre className="rounded-xl border border-rose-200 bg-rose-950 p-3.5 font-mono text-xs text-rose-200 overflow-x-auto max-h-48 whitespace-pre-wrap">
+                    {selectedSubmission.compilerOutput}
+                  </pre>
+                )}
+
+              {Array.isArray(selectedSubmission.testCases) &&
+              selectedSubmission.testCases.length > 0 ? (
+                <div className="space-y-2">
+                  {selectedSubmission.testCases.map((tc, idx) => {
+                    const isPassed = tc.status === "passed";
+                    return (
+                      <div
+                        key={idx}
+                        className={`rounded-xl border p-3 text-xs ${
+                          isPassed
+                            ? "border-emerald-200 bg-emerald-50/50"
+                            : "border-rose-200 bg-rose-50/50"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 font-bold text-slate-800">
+                            {isPassed ? (
+                              <CheckCircle2 size={15} className="text-emerald-600" />
+                            ) : (
+                              <XCircle size={15} className="text-rose-600" />
+                            )}
+                            <span>Test Case #{tc.testCaseNumber || idx + 1}</span>
+                            {tc.isHidden && (
+                              <span className="inline-flex items-center gap-1 rounded bg-slate-200/80 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                                <Lock size={10} />
+                                Hidden
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {tc.executionTime > 0 && (
+                              <span className="text-[11px] text-slate-500">
+                                {tc.executionTime} ms
+                              </span>
+                            )}
+                            <span
+                              className={`rounded px-2 py-0.5 text-[10px] font-bold uppercase ${
+                                isPassed
+                                  ? "bg-emerald-100 text-emerald-800"
+                                  : "bg-rose-100 text-rose-800"
+                              }`}
+                            >
+                              {isPassed ? "Passed" : (tc.status || "Failed").replaceAll("_", " ")}
+                            </span>
+                          </div>
+                        </div>
+
+                        {!tc.isHidden && (
+                          <div className="mt-2.5 grid gap-2 sm:grid-cols-3 font-mono text-[11px]">
+                            <div className="rounded-lg border border-slate-200 bg-white p-2">
+                              <span className="block font-sans text-[10px] font-bold text-slate-400">
+                                Input
+                              </span>
+                              <pre className="whitespace-pre-wrap text-slate-700 mt-0.5">
+                                {tc.input || "<empty>"}
+                              </pre>
+                            </div>
+                            <div className="rounded-lg border border-slate-200 bg-white p-2">
+                              <span className="block font-sans text-[10px] font-bold text-slate-400">
+                                Expected
+                              </span>
+                              <pre className="whitespace-pre-wrap text-slate-800 mt-0.5">
+                                {tc.expectedOutput || "<empty>"}
+                              </pre>
+                            </div>
+                            <div
+                              className={`rounded-lg border bg-white p-2 ${
+                                isPassed ? "border-emerald-200" : "border-rose-200"
+                              }`}
+                            >
+                              <span
+                                className={`block font-sans text-[10px] font-bold ${
+                                  isPassed ? "text-emerald-600" : "text-rose-600"
+                                }`}
+                              >
+                                Your Output
+                              </span>
+                              <pre
+                                className={`whitespace-pre-wrap mt-0.5 ${
+                                  isPassed ? "text-emerald-800" : "text-rose-700"
+                                }`}
+                              >
+                                {tc.actualOutput || tc.error || "<empty output>"}
+                              </pre>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               ) : (
-                <div className="rounded-xl bg-slate-50 p-6 text-center text-sm text-slate-500">
-                  No AI evaluation recorded for this submission.
+                <div className="rounded-xl bg-slate-50 p-5 text-center text-xs text-slate-500">
+                  No individual test case breakdown recorded for this submission.
                 </div>
               )}
             </div>

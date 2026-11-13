@@ -1,17 +1,21 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import Loader from "../../components/common/Loader";
-import Button from "../../components/common/Button";
 import ProblemDescription from "../../components/problem/ProblemDescription";
 import CodeEditor from "../../components/problem/CodeEditor";
-import AIEvaluationResult from "../../components/problem/AIEvaluationResult";
+import ExecutionPanel from "../../components/problem/ExecutionPanel";
 import StreakCelebrationModal from "../../components/problem/StreakCelebrationModal";
 
-import { getProblemById } from "../../services/problemService";
-import { submitCode, getMySubmissions } from "../../services/submissionService";
-import { CheckCircle2, Loader2 } from "lucide-react";
-import { useRestriction } from "../../context/RestrictionContext";
+import { getProblemById, invalidateProblemCache } from "../../services/problemService";
+import {
+  runCode as executeRunCode,
+  submitCode,
+  getMySubmissions,
+} from "../../services/submissionService";
+import { useAuth } from "../../context/AuthContext";
+import { useCodeDraft } from "../../hooks/useCodeDraft";
+import { parseCompilerDiagnostics } from "../../utils/compilerDiagnostics";
 
 const DEFAULT_BOILERPLATE = `#include <stdio.h>
 
@@ -22,33 +26,116 @@ int main() {
 
 const ProblemDetails = () => {
   const { id } = useParams();
-  const { switchCount } = useRestriction();
+  const { user } = useAuth();
+  const userId = user?.id || user?._id || "anonymous";
+
+  const editorRef = useRef(null);
+  const splitContainerRef = useRef(null);
 
   const [problem, setProblem] = useState(null);
-  const [code, setCode] = useState(DEFAULT_BOILERPLATE);
   const [hasPreviousSubmission, setHasPreviousSubmission] = useState(false);
+  const [previousCode, setPreviousCode] = useState(null);
   const [loading, setLoading] = useState(true);
+
+  // Run vs Submit states
+  const [running, setRunning] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [message, setMessage] = useState("");
+  const [runResult, setRunResult] = useState(null);
+  const [runError, setRunError] = useState("");
+  const [submitError, setSubmitError] = useState("");
   const [evaluationResult, setEvaluationResult] = useState(null);
   const [allPassed, setAllPassed] = useState(false);
   const [progress, setProgress] = useState(null);
   const [showStreakModal, setShowStreakModal] = useState(false);
 
+  // Diagnostics for Monaco line highlighting & clickable error panel
+  const [diagnostics, setDiagnostics] = useState([]);
+
+  // Bottom execution panel state
+  const [bottomTab, setBottomTab] = useState("input"); // "input" | "output" | "verdict"
+  const [runMode, setRunMode] = useState("sample"); // "sample" | "custom"
+  const [customInput, setCustomInput] = useState("");
+  const [customExpectedOutput, setCustomExpectedOutput] = useState("");
+
+  // Resizable panel state (desktop horizontal split + editor height)
+  const [leftWidthPercent, setLeftWidthPercent] = useState(44);
+  const [editorHeightPx, setEditorHeightPx] = useState(420);
+
+  const {
+    code,
+    codeRef,
+    saveStatus,
+    hasPendingOfflineSync,
+    initializeDraft,
+    updateCode,
+    flushDraft,
+    clearDraft,
+  } = useCodeDraft({
+    problemId: id,
+    userId,
+    defaultCode: DEFAULT_BOILERPLATE,
+  });
+
+  const savePreviousCode = useCallback(
+    (nextCode) => {
+      if (!nextCode || !nextCode.trim() || nextCode === DEFAULT_BOILERPLATE) {
+        return;
+      }
+      setPreviousCode(nextCode);
+      try {
+        localStorage.setItem(`clab_previous_code_${id}`, nextCode);
+      } catch {
+        // Ignore storage quota errors
+      }
+    },
+    [id]
+  );
+
+  // Load problem, submission history, and draft whenever problem ID changes
   useEffect(() => {
+    let cancelled = false;
+
     const loadProblem = async () => {
+      setLoading(true);
+      setProblem(null);
+      setHasPreviousSubmission(false);
+      let storedPrevious = null;
+      try {
+        storedPrevious = localStorage.getItem(`clab_previous_code_${id}`);
+      } catch {
+        storedPrevious = null;
+      }
+      setPreviousCode(storedPrevious);
+      setRunResult(null);
+      setRunError("");
+      setSubmitError("");
+      setEvaluationResult(null);
+      setAllPassed(false);
+      setDiagnostics([]);
+      setBottomTab("input");
+      setRunMode("sample");
+
       try {
         const data = await getProblemById(id);
-        setProblem(data.problem);
+        if (cancelled) return;
 
-        // Load previously submitted code if available
+        setProblem(data.problem);
+        setCustomInput(data.problem?.sampleInput || "");
+        setCustomExpectedOutput("");
+
+        let fallbackCode = DEFAULT_BOILERPLATE;
+        let loadedPrevSub = false;
+
         if (data.lastSubmission) {
           if (data.lastSubmission.code) {
-            setCode(data.lastSubmission.code);
-            setHasPreviousSubmission(true);
+            fallbackCode = data.lastSubmission.code;
+            loadedPrevSub = true;
           }
           if (data.lastSubmission.aiEvaluation || data.lastSubmission.status) {
             setEvaluationResult(data.lastSubmission);
+            if (data.lastSubmission.status === "compile_error" && data.lastSubmission.compilerOutput) {
+              setDiagnostics(parseCompilerDiagnostics(data.lastSubmission.compilerOutput));
+            }
           }
           if (data.lastSubmission.allPassed !== undefined) {
             setAllPassed(data.lastSubmission.allPassed);
@@ -56,17 +143,17 @@ const ProblemDetails = () => {
             setAllPassed(true);
           }
         } else if (data.problem?.isSolved) {
-          // Fallback: check my submissions for this problem
           try {
             const subData = await getMySubmissions();
+            if (cancelled) return;
             const matchingSub = subData.submissions?.find(
               (s) =>
                 s.problem?._id?.toString() === id ||
                 s.problem?.toString() === id
             );
             if (matchingSub && matchingSub.code) {
-              setCode(matchingSub.code);
-              setHasPreviousSubmission(true);
+              fallbackCode = matchingSub.code;
+              loadedPrevSub = true;
               setEvaluationResult(matchingSub);
               setAllPassed(matchingSub.status === "accepted");
             }
@@ -74,32 +161,121 @@ const ProblemDetails = () => {
             console.error("Error fetching submission fallback:", subErr);
           }
         }
+
+        setHasPreviousSubmission(loadedPrevSub);
+        if (loadedPrevSub && fallbackCode) {
+          savePreviousCode(fallbackCode);
+        }
+
+        // Initialize draft (restores saved/offline draft without overwriting student code)
+        await initializeDraft({ fallbackCode });
       } catch (error) {
         console.error(error);
       } finally {
-        setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     };
 
     loadProblem();
-  }, [id]);
 
-  const handleSubmit = async () => {
-    if (!code || !code.trim() || submitting) return;
+    return () => {
+      cancelled = true;
+    };
+  }, [id, initializeDraft, savePreviousCode]);
+
+  // Clear stale compiler error highlights once student starts editing
+  const handleCodeChange = useCallback(
+    (nextCode) => {
+      updateCode(nextCode);
+    },
+    [updateCode]
+  );
+
+  // Jump Monaco cursor to clicked diagnostic error line
+  const handleSelectErrorLine = useCallback((line, column = 1) => {
+    editorRef.current?.jumpToLine(line, column);
+  }, []);
+
+  // RUN CODE (never creates submission, never affects progress/streaks)
+  const handleRun = useCallback(async () => {
+    const latestCode = editorRef.current?.getCurrentCode() ?? codeRef.current;
+    if (!latestCode || !latestCode.trim() || running || submitting) return;
+
+    try {
+      setRunning(true);
+      setRunError("");
+      setDiagnostics([]);
+      editorRef.current?.clearDiagnostics();
+      setBottomTab("output");
+
+      const data = await executeRunCode({
+        problemId: id,
+        code: latestCode,
+        customInput,
+        customExpectedOutput,
+        mode: runMode,
+      });
+
+      setRunResult(data);
+
+      const parsedDiagnostics =
+        Array.isArray(data.diagnostics) && data.diagnostics.length > 0
+          ? data.diagnostics
+          : data.compilerOutput
+          ? parseCompilerDiagnostics(data.compilerOutput)
+          : [];
+
+      // Only apply line markers for compiler diagnostics; never fabricate runtime lines
+      if (parsedDiagnostics.length > 0) {
+        setDiagnostics(parsedDiagnostics);
+      }
+    } catch (error) {
+      const errMsg =
+        error.response?.data?.message ||
+        "Code execution failed. Please verify the execution service is running.";
+      setRunError(errMsg);
+    } finally {
+      setRunning(false);
+    }
+  }, [id, customInput, customExpectedOutput, runMode, running, submitting, codeRef]);
+
+  // SUBMIT CODE (official grading + progress/streak updates)
+  const handleSubmit = useCallback(async () => {
+    const latestCode = editorRef.current?.getCurrentCode() ?? codeRef.current;
+    if (!latestCode || !latestCode.trim() || submitting || running) return;
 
     try {
       setSubmitting(true);
-      setMessage("");
+      setSubmitError("");
+      setDiagnostics([]);
+      editorRef.current?.clearDiagnostics();
+      setBottomTab("verdict");
+
+      // Ensure latest code draft is also persisted safely
+      flushDraft();
+      savePreviousCode(latestCode);
 
       const data = await submitCode({
         problemId: id,
-        code,
+        code: latestCode,
         language: "c",
-        tabSwitches: switchCount || 0,
       });
 
-      // Deterministic judge result
       setEvaluationResult(data);
+      invalidateProblemCache(id);
+
+      const parsedDiagnostics =
+        Array.isArray(data.diagnostics) && data.diagnostics.length > 0
+          ? data.diagnostics
+          : data.compilerOutput
+          ? parseCompilerDiagnostics(data.compilerOutput)
+          : [];
+
+      if (parsedDiagnostics.length > 0) {
+        setDiagnostics(parsedDiagnostics);
+      }
 
       if (data.allPassed !== undefined) {
         setAllPassed(data.allPassed);
@@ -113,16 +289,77 @@ const ProblemDetails = () => {
       if (data.progress) {
         setProgress(data.progress);
       }
-
-      setMessage(data.message || "");
     } catch (error) {
       const errMsg =
         error.response?.data?.message ||
         "Submission failed. Please verify that the execution service is running.";
-      setMessage(errMsg);
+      setSubmitError(errMsg);
     } finally {
       setSubmitting(false);
     }
+  }, [id, submitting, running, codeRef, flushDraft, savePreviousCode]);
+
+  // Reset Code (after confirmation inside CodeEditor)
+  const handleResetCode = useCallback(async () => {
+    const currentBeforeReset = editorRef.current?.getCurrentCode() ?? codeRef.current;
+    savePreviousCode(currentBeforeReset);
+    await clearDraft(DEFAULT_BOILERPLATE);
+    setHasPreviousSubmission(false);
+    setDiagnostics([]);
+    setRunResult(null);
+    setRunError("");
+    editorRef.current?.clearDiagnostics();
+  }, [clearDraft, codeRef, savePreviousCode]);
+
+  // Restore previous code (last submitted code or code prior to reset)
+  const handleRestorePreviousCode = useCallback(() => {
+    if (!previousCode) return;
+    updateCode(previousCode);
+    setDiagnostics([]);
+    editorRef.current?.clearDiagnostics();
+  }, [previousCode, updateCode]);
+
+  // Desktop horizontal split-pane drag handler
+  const startHorizontalResize = (e) => {
+    e.preventDefault();
+    const container = splitContainerRef.current;
+    if (!container) return;
+
+    const handleMouseMove = (moveEvent) => {
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const relativeX = moveEvent.clientX - rect.left;
+      const nextPercent = Math.min(62, Math.max(28, (relativeX / rect.width) * 100));
+      setLeftWidthPercent(nextPercent);
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+  };
+
+  // Vertical editor/bottom-panel resize handler
+  const startVerticalResize = (e) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = editorHeightPx;
+
+    const handleMouseMove = (moveEvent) => {
+      const delta = moveEvent.clientY - startY;
+      setEditorHeightPx(Math.min(720, Math.max(260, startHeight + delta)));
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
   };
 
   if (loading) {
@@ -137,104 +374,101 @@ const ProblemDetails = () => {
     );
   }
 
+  const effectiveDiagnostics =
+    diagnostics.length > 0
+      ? diagnostics
+      : evaluationResult?.status === "compile_error" && evaluationResult?.compilerOutput
+      ? parseCompilerDiagnostics(evaluationResult.compilerOutput)
+      : [];
+
   return (
-    <div className="mx-auto max-w-7xl">
-      <div className="grid gap-6 xl:grid-cols-2">
-        {/* Problem Description */}
-        <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-7 shadow-sm">
+    <div className="mx-auto max-w-[1600px]">
+      {/* Responsive split layout: stacked below lg, resizable split at lg+ */}
+      <div
+        ref={splitContainerRef}
+        className="flex flex-col lg:flex-row lg:items-start gap-4 lg:gap-0"
+      >
+        {/* LEFT PANEL: Problem Statement */}
+        <div
+          style={{ "--left-panel-width": `${leftWidthPercent}%` }}
+          className="w-full lg:w-[var(--left-panel-width)] lg:shrink-0 rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 shadow-sm lg:max-h-[calc(100vh-110px)] lg:overflow-y-auto"
+        >
           <ProblemDescription problem={problem} />
         </div>
 
-        {/* Code Editor & Execution Results */}
-        <div className="space-y-4">
-          {hasPreviousSubmission && (
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-xl bg-emerald-50 border border-emerald-200 px-4 py-3 text-xs text-emerald-800">
-              <div className="flex items-center gap-2">
-                <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
-                <span>
-                  <strong>{problem.isSolved ? "Solved Problem ✓" : "Previous Submission"}</strong> &mdash; Your submitted code and test results are loaded below.
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setCode(DEFAULT_BOILERPLATE);
-                  setHasPreviousSubmission(false);
-                }}
-                className="text-xs text-slate-500 hover:text-slate-800 underline shrink-0 font-medium text-left sm:text-right"
-              >
-                Clear &amp; Start Fresh
-              </button>
-            </div>
-          )}
+        {/* Horizontal Drag Handle (Desktop only) */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          title="Drag to resize problem and editor panels"
+          onMouseDown={startHorizontalResize}
+          className="hidden lg:flex w-3 self-stretch cursor-col-resize items-center justify-center group select-none shrink-0"
+        >
+          <div className="h-14 w-1 rounded-full bg-slate-200 group-hover:bg-indigo-400 transition" />
+        </div>
 
+        {/* RIGHT PANEL: Professional C Editor + Resizable Output Panel */}
+        <div className="flex-1 min-w-0 flex flex-col">
           <CodeEditor
+            ref={editorRef}
             code={code}
-            setCode={setCode}
+            setCode={handleCodeChange}
+            onBlur={flushDraft}
+            diagnostics={effectiveDiagnostics}
+            saveStatus={saveStatus}
+            hasPendingOfflineSync={hasPendingOfflineSync}
+            onManualSave={flushDraft}
+            onRun={handleRun}
+            onSubmit={handleSubmit}
+            running={running}
+            submitting={submitting}
             hasLoadedSubmission={hasPreviousSubmission}
             isSolved={Boolean(problem.isSolved)}
-            onResetCode={() => {
-              setCode(DEFAULT_BOILERPLATE);
-              setHasPreviousSubmission(false);
-            }}
+            onResetCode={handleResetCode}
+            canRestorePrevious={Boolean(previousCode && previousCode !== code)}
+            onRestorePreviousCode={handleRestorePreviousCode}
+            height={`${editorHeightPx}px`}
           />
 
-          {message && !evaluationResult && (
-            <div className="rounded-xl bg-red-50 p-4 text-sm font-medium text-red-700 border border-red-200">
-              {message}
-            </div>
-          )}
-
-          <Button
-            onClick={handleSubmit}
-            disabled={submitting || !code.trim()}
-            className="w-full"
+          {/* Vertical Drag Handle between Editor and Execution Panel */}
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            title="Drag to resize editor height"
+            onMouseDown={startVerticalResize}
+            className="hidden sm:flex h-3 cursor-row-resize items-center justify-center group select-none"
           >
-            {submitting ? (
-              <span className="flex items-center justify-center gap-2">
-                <Loader2 size={16} className="animate-spin" />
-                Running your code...
-              </span>
-            ) : hasPreviousSubmission ? (
-              "Re-submit Code"
-            ) : (
-              "Submit Code"
-            )}
-          </Button>
+            <div className="w-16 h-1 rounded-full bg-slate-200 group-hover:bg-indigo-400 transition" />
+          </div>
 
-          {/* Real-time Execution Banner when judging */}
-          {submitting && (
-            <div className="flex items-center justify-center gap-2.5 rounded-2xl bg-indigo-50 border border-indigo-200/80 p-3.5 text-xs font-semibold text-indigo-800 animate-pulse">
-              <Loader2 size={16} className="animate-spin text-indigo-600 shrink-0" />
-              <span>Compiling and executing test cases in sandbox...</span>
-            </div>
-          )}
-
-          {/* Deterministic Judge & AI Explanation Result */}
-          {evaluationResult && (
-            <div className="mt-4">
-              <AIEvaluationResult
-                evaluation={evaluationResult}
-                allPassed={allPassed}
-                progress={progress}
-                totalTestCases={
-                  evaluationResult.totalTestCases ??
-                  problem?.testCases?.length ??
-                  evaluationResult.testCases?.length ??
-                  0
-                }
-                testCasesPassed={
-                  evaluationResult.testCasesPassed ??
-                  evaluationResult.testCases?.filter((tc) => tc.status === "passed").length ??
-                  0
-                }
-              />
-            </div>
-          )}
+          <div className="mt-2 sm:mt-0">
+            <ExecutionPanel
+              activeTab={bottomTab}
+              setActiveTab={setBottomTab}
+              runMode={runMode}
+              setRunMode={setRunMode}
+              customInput={customInput}
+              setCustomInput={setCustomInput}
+              customExpectedOutput={customExpectedOutput}
+              setCustomExpectedOutput={setCustomExpectedOutput}
+              sampleInput={problem.sampleInput || ""}
+              running={running}
+              submitting={submitting}
+              runResult={runResult}
+              runError={runError}
+              evaluationResult={evaluationResult}
+              submitError={submitError}
+              allPassed={allPassed}
+              progress={progress}
+              problem={problem}
+              diagnostics={effectiveDiagnostics}
+              onSelectErrorLine={handleSelectErrorLine}
+            />
+          </div>
         </div>
       </div>
 
-      {/* Unique Streak Celebration Card Modal */}
+      {/* Streak Celebration Modal (only triggered on accepted official submission) */}
       <StreakCelebrationModal
         isOpen={showStreakModal}
         onClose={() => setShowStreakModal(false)}

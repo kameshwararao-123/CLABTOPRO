@@ -8,6 +8,7 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
+import NotificationBell from "../common/NotificationBell";
 
 const AdminNavbar = () => {
   const { user, logout } = useAuth();
@@ -90,8 +91,10 @@ const AdminNavbar = () => {
           </nav>
         </div>
 
-        {/* Right side Profile & Logout */}
+        {/* Right side Notifications, Profile & Logout */}
         <div className="flex items-center gap-4">
+          <NotificationBell isAdmin />
+
           <div className="hidden items-center gap-2.5 sm:flex">
             <div className="flex h-9 w-9 items-center justify-center rounded-full bg-indigo-100 font-bold text-indigo-600">
               {user?.username?.charAt(0)?.toUpperCase() || "A"}

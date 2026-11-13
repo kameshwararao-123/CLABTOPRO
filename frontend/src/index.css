@@ -15,3 +15,34 @@ body {
     "Segoe UI",
     sans-serif;
 }
+
+/* Monaco GCC Diagnostic Line Highlights & Gutter Markers */
+.clab-error-line-highlight {
+  background-color: rgba(239, 68, 68, 0.16) !important;
+  border-left: 3px solid #ef4444;
+}
+
+.clab-warning-line-highlight {
+  background-color: rgba(245, 158, 11, 0.14) !important;
+  border-left: 3px solid #f59e0b;
+}
+
+.clab-error-glyph {
+  background-color: #ef4444;
+  border-radius: 50%;
+  width: 10px !important;
+  height: 10px !important;
+  margin-left: 5px;
+  margin-top: 5px;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.3);
+}
+
+.clab-warning-glyph {
+  background-color: #f59e0b;
+  border-radius: 50%;
+  width: 10px !important;
+  height: 10px !important;
+  margin-left: 5px;
+  margin-top: 5px;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.3);
+}

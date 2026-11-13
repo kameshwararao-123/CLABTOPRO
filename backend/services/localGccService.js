@@ -11,6 +11,7 @@ import path from "node:path";
 import os from "node:os";
 import { spawn, exec } from "node:child_process";
 import { promisify } from "node:util";
+import { sanitizeCompilerOutput } from "../utils/compilerParser.js";
 
 const execAsync = promisify(exec);
 
@@ -79,14 +80,16 @@ export const executeLocalGcc = async ({
     // 2. Compile C Code
     let compileOutput = "";
     try {
-      const compileCmd = `gcc -O2 -Wall -std=c11 "${srcFile}" -o "${binFile}" -lm`;
+      const compileCmd = `gcc -O2 -Wall -Wno-unused-result -std=c11 "${srcFile}" -o "${binFile}" -lm`;
       const { stdout: cStdout, stderr: cStderr } = await execAsync(compileCmd, {
         cwd: tempDir,
         timeout: compileTimeout,
       });
-      compileOutput = (cStderr || cStdout || "").trim();
+      compileOutput = sanitizeCompilerOutput(cStderr || cStdout || "");
     } catch (compileErr) {
-      const errOut = (compileErr.stderr || compileErr.stdout || compileErr.message || "").trim();
+      const errOut = sanitizeCompilerOutput(
+        compileErr.stderr || compileErr.stdout || compileErr.message || ""
+      );
       return {
         success: true,
         compiled: false,
@@ -102,11 +105,22 @@ export const executeLocalGcc = async ({
       };
     }
 
-    // 3. Execute Compiled Binary with Sandboxed Timeouts
+    // 3. Execute Compiled Binary with Sandboxed Timeouts & Resource Limits
     const executionResult = await new Promise((resolve) => {
-      const child = spawn(binFile, [], {
+      const isLinux = os.platform() === "linux";
+      const cpuLimitSec = Math.max(2, Math.ceil(runTimeout / 1000) + 1);
+      const spawnCmd = isLinux ? "/bin/sh" : binFile;
+      const spawnArgs = isLinux
+        ? [
+            "-c",
+            `ulimit -t ${cpuLimitSec} -v 262144 -f 1024 -c 0 && exec "${binFile}"`,
+          ]
+        : [];
+
+      const child = spawn(spawnCmd, spawnArgs, {
         cwd: tempDir,
-        env: { PATH: process.env.PATH, LANG: "C.UTF-8" },
+        detached: os.platform() !== "win32",
+        env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" },
         stdio: ["pipe", "pipe", "pipe"],
       });
 
@@ -114,14 +128,22 @@ export const executeLocalGcc = async ({
       let stderr = "";
       let timedOut = false;
 
-      // Watchdog timer for execution timeout
-      const timer = setTimeout(() => {
-        timedOut = true;
+      const killProcessGroup = () => {
         try {
-          child.kill("SIGKILL");
+          if (os.platform() !== "win32" && child.pid) {
+            process.kill(-child.pid, "SIGKILL");
+          } else {
+            child.kill("SIGKILL");
+          }
         } catch {
           // Process might already be dead
         }
+      };
+
+      // Watchdog timer for execution timeout
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killProcessGroup();
       }, runTimeout);
 
       child.stdout.on("data", (chunk) => {
@@ -147,6 +169,7 @@ export const executeLocalGcc = async ({
 
       child.on("close", (exitCode, signal) => {
         clearTimeout(timer);
+        killProcessGroup();
 
         const executionTimeMs = Date.now() - startTime;
         const isRuntimeError =

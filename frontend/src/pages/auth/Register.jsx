@@ -15,17 +15,31 @@ const Register = () => {
   });
 
   const [error, setError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
   const [loading, setLoading] = useState(false);
 
   const handleChange = (e) => {
+    const { name, value } = e.target;
     setForm({
       ...form,
-      [e.target.name]: e.target.value,
+      [name]: value,
     });
+    if (name === "password") {
+      if (value.length > 0 && value.length < 6) {
+        setPasswordError("Password must be at least 6 characters long");
+      } else {
+        setPasswordError("");
+      }
+    }
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    if (form.password.length < 6) {
+      setPasswordError("Password must be at least 6 characters long");
+      return;
+    }
 
     try {
       setLoading(true);
@@ -97,15 +111,22 @@ const Register = () => {
             required
           />
 
-          <Input
-            label="Password"
-            type="password"
-            name="password"
-            value={form.password}
-            onChange={handleChange}
-            placeholder="Minimum 6 characters"
-            required
-          />
+          <div>
+            <Input
+              label="Password"
+              type="password"
+              name="password"
+              value={form.password}
+              onChange={handleChange}
+              placeholder="Minimum 6 characters"
+              required
+            />
+            {passwordError && (
+              <p className="mt-1.5 text-xs font-medium text-red-600">
+                {passwordError}
+              </p>
+            )}
+          </div>
 
           <Button
             type="submit"

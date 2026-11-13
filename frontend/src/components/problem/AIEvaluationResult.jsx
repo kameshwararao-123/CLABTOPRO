@@ -24,6 +24,8 @@ const AIEvaluationResult = ({
   executionTime,
   compilerOutput,
   testCases,
+  diagnostics = [],
+  onSelectErrorLine,
 }) => {
   const [showAllTests, setShowAllTests] = React.useState(false);
 
@@ -159,6 +161,34 @@ const AIEvaluationResult = ({
                 </div>
               </div>
             </div>
+
+            {Array.isArray(diagnostics) && diagnostics.length > 0 && (
+              <div className="space-y-1.5">
+                {diagnostics.map((d, i) => {
+                  const clickable = Boolean(onSelectErrorLine && Number.isInteger(d.line) && d.line > 0);
+                  return (
+                    <button
+                      key={`${d.file}-${d.line}-${d.column}-${i}`}
+                      type="button"
+                      disabled={!clickable}
+                      onClick={() => clickable && onSelectErrorLine(d.line, d.column || 1)}
+                      className={`w-full text-left rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs flex items-center justify-between gap-2 ${
+                        clickable ? "hover:bg-rose-100/60 cursor-pointer" : "cursor-default"
+                      }`}
+                    >
+                      <span className="font-medium text-rose-900 break-words">
+                        {d.message}
+                      </span>
+                      {Number.isInteger(d.line) && d.line > 0 && (
+                        <span className="shrink-0 rounded bg-rose-600 px-2 py-0.5 text-[10px] font-bold text-white">
+                          Line {d.line} →
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             {effectiveCompilerOutput && (
               <div className="rounded-xl bg-slate-900 p-3.5 text-slate-100 font-mono text-xs overflow-x-auto border border-slate-800 shadow-inner">

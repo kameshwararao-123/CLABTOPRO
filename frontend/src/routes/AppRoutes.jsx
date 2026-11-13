@@ -1,33 +1,38 @@
+import { lazy, Suspense } from "react";
 import {
   Routes,
   Route,
   Navigate,
 } from "react-router-dom";
-import Home from "../pages/Home";
-import Login from "../pages/auth/Login";
-import Register from "../pages/auth/Register";
-
-// Student pages
-import Dashboard from "../pages/student/Dashboard";
-import TodayProblem from "../pages/student/TodayProblem";
-import Problems from "../pages/student/Problems";
-import ProblemDetails from "../pages/student/ProblemDetails";
-import Submissions from "../pages/student/Submissions";
-import Statistics from "../pages/student/Statistics";
-import Profile from "../pages/student/Profile";
-
-// Admin pages
-import AdminDashboard from "../pages/admin/AdminDashboard";
-import CreateProblem from "../pages/admin/CreateProblem";
-import AdminProblems from "../pages/admin/AdminProblems";
-import AdminStudents from "../pages/admin/AdminStudents";
-import EditProblem from "../pages/admin/EditProblem";
-import AdminProblemDetails from "../pages/admin/AdminProblemDetails";
-
+import Loader from "../components/common/Loader";
 import StudentLayout from "../components/layout/StudentLayout";
 import AdminLayout from "../components/layout/AdminLayout";
-
 import { useAuth } from "../context/AuthContext";
+
+// Public pages
+const Home = lazy(() => import("../pages/Home"));
+const Login = lazy(() => import("../pages/auth/Login"));
+const Register = lazy(() => import("../pages/auth/Register"));
+const ForgotPassword = lazy(() => import("../pages/auth/ForgotPassword"));
+const ResetPassword = lazy(() => import("../pages/auth/ResetPassword"));
+
+// Student pages (ProblemDetails lazy-loads Monaco Editor only when needed)
+const Dashboard = lazy(() => import("../pages/student/Dashboard"));
+const TodayProblem = lazy(() => import("../pages/student/TodayProblem"));
+const Problems = lazy(() => import("../pages/student/Problems"));
+const ProblemDetails = lazy(() => import("../pages/student/ProblemDetails"));
+const Submissions = lazy(() => import("../pages/student/Submissions"));
+const Statistics = lazy(() => import("../pages/student/Statistics"));
+const Leaderboard = lazy(() => import("../pages/student/Leaderboard"));
+const Profile = lazy(() => import("../pages/student/Profile"));
+
+// Admin pages
+const AdminDashboard = lazy(() => import("../pages/admin/AdminDashboard"));
+const CreateProblem = lazy(() => import("../pages/admin/CreateProblem"));
+const AdminProblems = lazy(() => import("../pages/admin/AdminProblems"));
+const AdminStudents = lazy(() => import("../pages/admin/AdminStudents"));
+const EditProblem = lazy(() => import("../pages/admin/EditProblem"));
+const AdminProblemDetails = lazy(() => import("../pages/admin/AdminProblemDetails"));
 
 const ProtectedRoute = ({ children }) => {
   const { isAuthenticated, user } = useAuth();
@@ -74,11 +79,14 @@ const FallbackRoute = () => {
 
 const AppRoutes = () => {
   return (
-    <Routes>
+    <Suspense fallback={<Loader />}>
+      <Routes>
       {/* Public */}
       <Route path="/" element={<Home />} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/reset-password/:token" element={<ResetPassword />} />
 
       {/* Student */}
       <Route
@@ -94,6 +102,7 @@ const AppRoutes = () => {
         <Route path="/problems/:id" element={<ProblemDetails />} />
         <Route path="/submissions" element={<Submissions />} />
         <Route path="/statistics" element={<Statistics />} />
+        <Route path="/leaderboard" element={<Leaderboard />} />
         <Route path="/profile" element={<Profile />} />
       </Route>
 
@@ -119,7 +128,8 @@ const AppRoutes = () => {
 
       {/* Fallback */}
       <Route path="*" element={<FallbackRoute />} />
-    </Routes>
+      </Routes>
+    </Suspense>
   );
 };
 

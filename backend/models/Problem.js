@@ -108,6 +108,9 @@ const problemSchema = new mongoose.Schema(
   }
 );
 
+problemSchema.index({ status: 1, publishDate: -1, createdAt: -1 });
+problemSchema.index({ topic: 1, difficulty: 1 });
+
 const Problem = mongoose.model(
   "Problem",
   problemSchema

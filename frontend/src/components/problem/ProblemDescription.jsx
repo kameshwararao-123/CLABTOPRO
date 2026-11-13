@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { CheckCircle } from "lucide-react";
 
 const ProblemDescription = ({ problem }) => {
@@ -101,4 +102,4 @@ const ProblemDescription = ({ problem }) => {
   );
 };
 
-export default ProblemDescription;
+export default memo(ProblemDescription);

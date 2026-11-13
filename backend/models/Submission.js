@@ -148,6 +148,10 @@ const submissionSchema = new mongoose.Schema(
   }
 );
 
+submissionSchema.index({ user: 1, createdAt: -1 });
+submissionSchema.index({ user: 1, problem: 1, status: 1, createdAt: -1 });
+submissionSchema.index({ problem: 1, status: 1 });
+
 /**
  * Strips secret inputs, expected outputs, and actual outputs for hidden test cases
  * before returning submission objects to students.

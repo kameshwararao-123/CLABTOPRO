@@ -5,6 +5,7 @@ import {
   List,
   FileCode,
   BarChart3,
+  Trophy,
   User,
   LogOut,
   X,
@@ -39,6 +40,11 @@ const Sidebar = ({ isOpen, onClose }) => {
       name: "Statistics",
       path: "/statistics",
       icon: BarChart3,
+    },
+    {
+      name: "Leaderboard",
+      path: "/leaderboard",
+      icon: Trophy,
     },
     {
       name: "Profile",

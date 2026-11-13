@@ -1,5 +1,10 @@
 import api from "./api";
 
+export const runCode = async (runData) => {
+  const response = await api.post("/submissions/run", runData);
+  return response.data;
+};
+
 export const submitCode = async (submissionData) => {
   const response = await api.post("/submissions", submissionData);
   return response.data;

@@ -1,6 +1,8 @@
 import User from "../models/User.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
+import { sendPasswordResetEmail } from "../services/emailService.js";
 
 
 // ================= REGISTER =================
@@ -19,6 +21,12 @@ export const registerController = async (req, res) => {
     ) {
       return res.status(400).json({
         message: "All fields are required",
+      });
+    }
+
+    if (typeof password !== "string" || password.length < 6) {
+      return res.status(400).json({
+        message: "Password must be at least 6 characters long",
       });
     }
     // Check email
@@ -131,6 +139,125 @@ export const loginController = async (req, res) => {
 
     res.status(500).json({
       message: "Login failed",
+    });
+  }
+};
+
+
+// ================= FORGOT PASSWORD =================
+
+export const forgotPasswordController = async (req, res) => {
+  try {
+    const email = req.body?.email?.trim().toLowerCase();
+
+    if (!email) {
+      return res.status(400).json({
+        message: "Email is required",
+      });
+    }
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({
+        message: "No account found with this email address",
+      });
+    }
+
+    const rawToken = crypto.randomBytes(32).toString("hex");
+    const hashedToken = crypto
+      .createHash("sha256")
+      .update(rawToken)
+      .digest("hex");
+
+    user.resetPasswordToken = hashedToken;
+    user.resetPasswordExpires = new Date(Date.now() + 15 * 60 * 1000);
+    await user.save();
+
+    const origin =
+      req.headers.origin || process.env.FRONTEND_URL || "http://localhost:5173";
+    const resetUrl = `${origin}/reset-password/${rawToken}`;
+
+    const emailResult = await sendPasswordResetEmail({
+      to: user.email,
+      username: user.username,
+      resetUrl,
+    });
+
+    if (emailResult.sent) {
+      return res.status(200).json({
+        message: "Password reset link has been sent to your email.",
+        emailSent: true,
+      });
+    }
+
+    console.log(`PASSWORD RESET LINK for ${user.email}: ${resetUrl}`);
+
+    res.status(200).json({
+      message:
+        "SMTP is not configured in backend/.env; generated a local reset link below.",
+      emailSent: false,
+      resetToken: rawToken,
+      resetUrl,
+    });
+  } catch (error) {
+    console.error("FORGOT PASSWORD ERROR:", error);
+
+    res.status(500).json({
+      message: "Failed to process forgot password request",
+    });
+  }
+};
+
+
+// ================= RESET PASSWORD =================
+
+export const resetPasswordController = async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { password } = req.body;
+
+    if (!token) {
+      return res.status(400).json({
+        message: "Reset token is required",
+      });
+    }
+
+    if (typeof password !== "string" || password.length < 6) {
+      return res.status(400).json({
+        message: "Password must be at least 6 characters long",
+      });
+    }
+
+    const hashedToken = crypto
+      .createHash("sha256")
+      .update(token)
+      .digest("hex");
+
+    const user = await User.findOne({
+      resetPasswordToken: hashedToken,
+      resetPasswordExpires: { $gt: new Date() },
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        message: "Reset link is invalid or has expired",
+      });
+    }
+
+    user.password = await bcrypt.hash(password, 10);
+    user.resetPasswordToken = null;
+    user.resetPasswordExpires = null;
+    await user.save();
+
+    res.status(200).json({
+      message: "Password reset successful. You can now log in.",
+    });
+  } catch (error) {
+    console.error("RESET PASSWORD ERROR:", error);
+
+    res.status(500).json({
+      message: "Failed to reset password",
     });
   }
 };
