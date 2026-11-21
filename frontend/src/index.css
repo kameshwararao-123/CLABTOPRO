@@ -46,3 +46,11 @@ body {
   margin-top: 5px;
   box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.3);
 }
+
+/* Preformatted Pattern & Matrix Output Styling */
+.pattern-output {
+  white-space: pre !important;
+  overflow-x: auto !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
+  tab-size: 4;
+}

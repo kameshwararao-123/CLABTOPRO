@@ -5,7 +5,7 @@ import {
   Users,
   PlusCircle,
   LogOut,
-  ShieldAlert,
+  GraduationCap,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import NotificationBell from "../common/NotificationBell";
@@ -31,6 +31,12 @@ const AdminNavbar = () => {
       path: "/admin/problems",
       icon: Code2,
       end: true,
+    },
+    {
+      name: "Exams",
+      path: "/admin/exams",
+      icon: GraduationCap,
+      end: false,
     },
     {
       name: "Students",

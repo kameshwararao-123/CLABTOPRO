@@ -113,7 +113,7 @@ export const executeLocalGcc = async ({
       const spawnArgs = isLinux
         ? [
             "-c",
-            `ulimit -t ${cpuLimitSec} -v 262144 -f 1024 -c 0 && exec "${binFile}"`,
+            `ulimit -t ${cpuLimitSec} && ulimit -v 262144 && ulimit -f 1024 && ulimit -c 0 && exec "${binFile}"`,
           ]
         : [];
 

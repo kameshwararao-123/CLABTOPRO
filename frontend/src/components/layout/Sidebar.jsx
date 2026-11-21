@@ -7,6 +7,7 @@ import {
   BarChart3,
   Trophy,
   User,
+  GraduationCap,
   LogOut,
   X,
 } from "lucide-react";
@@ -45,6 +46,11 @@ const Sidebar = ({ isOpen, onClose }) => {
       name: "Leaderboard",
       path: "/leaderboard",
       icon: Trophy,
+    },
+    {
+      name: "Exams",
+      path: "/exams",
+      icon: GraduationCap,
     },
     {
       name: "Profile",

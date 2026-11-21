@@ -310,6 +310,11 @@ export const initMonacoC = () => {
   monaco.languages.registerCompletionItemProvider("c", {
     triggerCharacters: ["<", '"', ".", "#"],
     provideCompletionItems: (model, position) => {
+      // In Exam Mode: strictly suppress all code completions, snippets, and keywords
+      if (model.isExamMode || model.uri?.path?.toLowerCase().includes("exam")) {
+        return { suggestions: [] };
+      }
+
       const lineContent = model.getLineContent(position.lineNumber);
       const textBeforeCursor = lineContent.slice(0, position.column - 1);
 

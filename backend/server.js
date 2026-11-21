@@ -15,6 +15,7 @@ import executionRoutes from "./routes/executionRoutes.js";
 import draftRoutes from "./routes/draftRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import leaderboardRoutes from "./routes/leaderboardRoutes.js";
+import examRoutes from "./routes/examRoutes.js";
 import {
   requestLogger,
   notFoundHandler,
@@ -50,6 +51,8 @@ app.use("/api/drafts", draftRoutes);
 app.use("/api/notifications", notificationRoutes);
 
 app.use("/api/leaderboard", leaderboardRoutes);
+
+app.use("/api/exams", examRoutes);
 
 //for server testing.....
 app.get("/", (req, res) => {
