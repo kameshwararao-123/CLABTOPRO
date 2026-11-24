@@ -56,8 +56,8 @@ export const setParticipatingStudents = async (examId, studentIds) => {
   return response.data;
 };
 
-export const allocateExamQuestions = async (examId) => {
-  const response = await api.post(`/exams/${examId}/allocate`);
+export const allocateExamQuestions = async (examId, questionsPerStudent = 1) => {
+  const response = await api.post(`/exams/${examId}/allocate`, { questionsPerStudent });
   return response.data;
 };
 
@@ -66,8 +66,8 @@ export const getExamAllocations = async (examId) => {
   return response.data;
 };
 
-export const startExam = async (examId) => {
-  const response = await api.post(`/exams/${examId}/start`);
+export const startExam = async (examId, questionsPerStudent) => {
+  const response = await api.post(`/exams/${examId}/start`, { questionsPerStudent });
   return response.data;
 };
 
@@ -78,6 +78,11 @@ export const completeExam = async (examId) => {
 
 export const getExamMonitoring = async (examId) => {
   const response = await api.get(`/exams/${examId}/monitoring`);
+  return response.data;
+};
+
+export const inspectStudentVivaExam = async (examId, studentId) => {
+  const response = await api.get(`/exams/${examId}/students/${studentId}/viva-inspect`);
   return response.data;
 };
 
@@ -142,6 +147,11 @@ export const deleteExtractionJob = async (examId, jobId) => {
 // STUDENT EXAM SERVICE
 // =========================================================================
 
+export const enrollStudentWithCode = async (examCode) => {
+  const response = await api.post("/exams/student/enroll", { examCode });
+  return response.data;
+};
+
 export const getStudentExams = async (examType) => {
   const response = await api.get("/exams/student/list", {
     params: { examType },
@@ -159,36 +169,119 @@ export const acknowledgeInstructions = async (examId) => {
   return response.data;
 };
 
-export const getMyAssignedQuestion = async (examId) => {
-  const response = await api.get(`/exams/${examId}/my-question`);
+export const getMyAssignedQuestion = async (examId, params = {}) => {
+  const response = await api.get(`/exams/${examId}/my-question`, { params });
   return response.data;
 };
 
-export const autosaveAnswerDraft = async (examId, answerText) => {
+export const autosaveAnswerDraft = async (examId, answerText, questionId) => {
   const response = await api.post(`/exams/${examId}/answers/autosave`, {
     answerText,
+    questionId,
   });
   return response.data;
 };
 
-export const evaluatePaperAnswer = async (examId, answerText) => {
-  const response = await api.post(`/exams/${examId}/answers/evaluate`, {
+export const evaluatePaperAnswer = async (examId, answerText, questionId) => {
+  const response = await api.post(`/exams/${examId}/answers/submit`, {
     answerText,
+    questionId,
   });
   return response.data;
 };
 
-export const runExamCode = async (examId, code) => {
-  const response = await api.post(`/exams/${examId}/compiler/run`, { code });
+export const submitPaperAnswer = async (examId, answerText, questionId) => {
+  const response = await api.post(`/exams/${examId}/answers/submit`, {
+    answerText,
+    questionId,
+  });
   return response.data;
 };
 
-export const submitExamCode = async (examId, code) => {
-  const response = await api.post(`/exams/${examId}/compiler/submit`, { code });
+export const facultyEvaluateStudentPaper = async (examId, studentId, questionId) => {
+  const response = await api.post(`/exams/${examId}/students/${studentId}/evaluate-paper`, {
+    questionId,
+  });
+  return response.data;
+};
+
+export const facultyAuthorizeCompiler = async (examId, studentId, questionId) => {
+  const response = await api.post(`/exams/${examId}/students/${studentId}/authorize-compiler`, {
+    questionId,
+  });
+  return response.data;
+};
+
+export const facultyReturnToNotepad = async (examId, studentId, questionId, feedback) => {
+  const response = await api.post(`/exams/${examId}/students/${studentId}/return-to-notepad`, {
+    questionId,
+    feedback,
+  });
+  return response.data;
+};
+
+export const getStudentConceptualReport = async (examId, studentId, questionId) => {
+  const response = await api.get(`/exams/${examId}/students/${studentId}/conceptual-report`, {
+    params: { questionId },
+  });
+  return response.data;
+};
+
+export const runExamCode = async (examId, code, questionId) => {
+  const response = await api.post(`/exams/${examId}/compiler/run`, {
+    code,
+    questionId,
+  });
+  return response.data;
+};
+
+export const submitExamCode = async (examId, code, questionId) => {
+  const response = await api.post(`/exams/${examId}/compiler/submit`, {
+    code,
+    questionId,
+  });
   return response.data;
 };
 
 export const getStudentExamCompletion = async (examId) => {
   const response = await api.get(`/exams/${examId}/completion`);
+  return response.data;
+};
+
+// =========================================================================
+// STUDENT VIVA MCQ EXAM SERVICE
+// =========================================================================
+
+export const getVivaExamInstructions = async (examId) => {
+  const response = await api.get(`/exams/${examId}/viva/instructions`);
+  return response.data;
+};
+
+export const acknowledgeVivaInstructions = async (examId) => {
+  const response = await api.post(`/exams/${examId}/viva/acknowledge`);
+  return response.data;
+};
+
+export const getVivaExamQuestions = async (examId) => {
+  const response = await api.get(`/exams/${examId}/viva/questions`);
+  return response.data;
+};
+
+export const saveVivaAnswerDraft = async (examId, questionId, selectedOption, isMarkedForReview = false) => {
+  const response = await api.post(`/exams/${examId}/viva/answers/draft`, {
+    questionId,
+    selectedOption,
+    isMarkedForReview,
+  });
+  return response.data;
+};
+
+export const submitVivaExam = async (examId, answers = {}) => {
+  const response = await api.post(`/exams/${examId}/viva/submit`, { answers });
+  return response.data;
+};
+
+export const getVivaStudentResults = async (examId) => {
+  const response = await api.get(`/exams/${examId}/viva/results`);
   return response.data;
 };

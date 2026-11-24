@@ -37,9 +37,32 @@ const examTestCaseSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    type: {
+      type: String,
+      enum: ["sample", "hidden"],
+      default: function () {
+        return this.isHidden ? "hidden" : "sample";
+      },
+    },
     timeLimitMs: {
       type: Number,
       default: 3000,
+    },
+  },
+  { _id: false }
+);
+
+const mcqOptionSchema = new mongoose.Schema(
+  {
+    optionId: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    text: {
+      type: String,
+      required: true,
+      trim: true,
     },
   },
   { _id: false }
@@ -51,6 +74,12 @@ const examQuestionSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Exam",
       required: true,
+      index: true,
+    },
+    questionType: {
+      type: String,
+      enum: ["coding", "mcq"],
+      default: "coding",
       index: true,
     },
     questionNumber: {
@@ -66,6 +95,30 @@ const examQuestionSchema = new mongoose.Schema(
       type: String,
       enum: ["manual", "bulk_extracted"],
       default: "manual",
+    },
+    // MCQ-specific fields
+    questionText: {
+      type: String,
+      default: "",
+    },
+    options: {
+      type: [mcqOptionSchema],
+      default: [],
+    },
+    correctAnswer: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    negativeMarks: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    extractionStatus: {
+      type: String,
+      enum: ["extracted", "needs_review", "approved", "Auto-Detected", "Needs Review"],
+      default: "approved",
     },
     contentType: {
       type: String,
@@ -137,7 +190,21 @@ const examQuestionSchema = new mongoose.Schema(
   }
 );
 
+examQuestionSchema.pre("validate", function () {
+  if (this.questionType === "mcq") {
+    if (!this.problemStatement && this.questionText) {
+      this.problemStatement = this.questionText;
+    }
+    if (!this.title) {
+      this.title = this.questionText
+        ? this.questionText.slice(0, 100).trim()
+        : `MCQ ${this.questionNumber || ""}`;
+    }
+  }
+});
+
 examQuestionSchema.index({ examId: 1, createdAt: 1 });
+examQuestionSchema.index({ examId: 1, questionType: 1 });
 
 const ExamQuestion = mongoose.model("ExamQuestion", examQuestionSchema);
 export default ExamQuestion;

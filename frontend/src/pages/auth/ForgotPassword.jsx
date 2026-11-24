@@ -14,13 +14,15 @@ const ForgotPassword = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
 
+    const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+
     try {
       setLoading(true);
       setError("");
       setSuccessMessage("");
       setResetToken("");
 
-      const data = await forgotPassword(email);
+      const data = await forgotPassword(normalizedEmail);
       setSuccessMessage(
         data.message || "Password reset instructions have been generated."
       );

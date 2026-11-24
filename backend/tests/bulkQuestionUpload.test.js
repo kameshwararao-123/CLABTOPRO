@@ -14,10 +14,16 @@ import {
   extractTextFromPdf,
   parseStructuredMatrix,
   classifyQuestionContent,
+  parseBlockAllTestCases,
+  parseBlockSampleTestCases,
 } from "../services/questionParserService.js";
 import {
   ruleBasedFallbackStructuring,
+  validateQuestionConfidence,
 } from "../services/questionExtractorAIService.js";
+import ExamQuestion from "../models/ExamQuestion.js";
+import { sanitizeExamCodeSubmissionForStudent } from "../models/ExamCodeSubmission.js";
+import { judgeSubmission } from "../services/judgeService.js";
 import {
   decodeHtmlEntities,
   normalizeSampleContent,
@@ -651,6 +657,322 @@ test("160–200 Question synthetic benchmark: batching, boundary precision, and 
   const processedQuestions = parsedBlocks.map((b) => ruleBasedFallbackStructuring(b));
   assert.equal(processedQuestions.length, TOTAL_QUESTIONS);
   assert.ok(processedQuestions.every((q) => q.title && q.problemStatement && q.sampleTestCases.length > 0));
+});
+
+test("Test Case Extraction: PDF with only sample test cases", () => {
+  const block = `Q1. Sum of Two Numbers
+Read two integers A and B and print their sum.
+
+Sample Test Cases:
+Sample Input:
+2 3
+Sample Output:
+5`;
+
+  const { sampleTestCases, hiddenTestCases } = parseBlockAllTestCases(block, "Sum of Two Numbers");
+  assert.equal(sampleTestCases.length, 1);
+  assert.equal(sampleTestCases[0].input, "2 3");
+  assert.equal(sampleTestCases[0].expectedOutput, "5");
+  assert.equal(sampleTestCases[0].isHidden, false);
+  assert.equal(hiddenTestCases.length, 0);
+});
+
+test("Test Case Extraction: PDF with both sample and hidden test cases", () => {
+  const block = `Q2. Difference of Two Numbers
+Read two integers A and B and print A - B.
+
+Sample Test Cases:
+Sample Input:
+10 4
+Sample Output:
+6
+
+Hidden Test Cases:
+Hidden Input:
+-5 -10
+Hidden Output:
+5`;
+
+  const { sampleTestCases, hiddenTestCases } = parseBlockAllTestCases(block, "Difference of Two Numbers");
+  assert.equal(sampleTestCases.length, 1);
+  assert.equal(sampleTestCases[0].input, "10 4");
+  assert.equal(sampleTestCases[0].expectedOutput, "6");
+  assert.equal(sampleTestCases[0].isHidden, false);
+  assert.equal(sampleTestCases[0].type, "sample");
+
+  assert.equal(hiddenTestCases.length, 1);
+  assert.equal(hiddenTestCases[0].input, "-5 -10");
+  assert.equal(hiddenTestCases[0].expectedOutput, "5");
+  assert.equal(hiddenTestCases[0].isHidden, true);
+  assert.equal(hiddenTestCases[0].type, "hidden");
+});
+
+test("Test Case Extraction: Multiple sample and multiple hidden test cases", () => {
+  const block = `Q3. Multiply Two Numbers
+Multiply integers.
+
+Sample Test Case 1:
+Input:
+2 3
+Output:
+6
+
+Sample Test Case 2:
+Input:
+4 5
+Output:
+20
+
+Hidden Test Case 1:
+Input:
+0 100
+Output:
+0
+
+Hidden Test Case 2:
+Input:
+-2 3
+Output:
+-6
+
+Hidden Test Case 3:
+Input:
+-5 -5
+Output:
+25`;
+
+  const { sampleTestCases, hiddenTestCases } = parseBlockAllTestCases(block, "Multiply Two Numbers");
+  assert.equal(sampleTestCases.length, 2);
+  assert.equal(sampleTestCases[0].input, "2 3");
+  assert.equal(sampleTestCases[0].expectedOutput, "6");
+  assert.equal(sampleTestCases[1].input, "4 5");
+  assert.equal(sampleTestCases[1].expectedOutput, "20");
+
+  assert.equal(hiddenTestCases.length, 3);
+  assert.equal(hiddenTestCases[0].input, "0 100");
+  assert.equal(hiddenTestCases[0].expectedOutput, "0");
+  assert.equal(hiddenTestCases[1].input, "-2 3");
+  assert.equal(hiddenTestCases[1].expectedOutput, "-6");
+  assert.equal(hiddenTestCases[2].input, "-5 -5");
+  assert.equal(hiddenTestCases[2].expectedOutput, "25");
+});
+
+test("Test Case Extraction: Supports Private Test Cases, Hidden Input/Output, and inline labels", () => {
+  const block = `Q4. Check Palindrome Number
+Determine if N is a palindrome.
+
+Example 1:
+Example Input:
+121
+Example Output:
+YES
+
+Private Test Cases:
+Private Input:
+12321
+Private Output:
+YES
+
+Test Case 3 (Hidden):
+Input:
+1234
+Output:
+NO`;
+
+  const { sampleTestCases, hiddenTestCases } = parseBlockAllTestCases(block, "Check Palindrome");
+  assert.equal(sampleTestCases.length, 1);
+  assert.equal(sampleTestCases[0].input, "121");
+  assert.equal(sampleTestCases[0].expectedOutput, "YES");
+
+  assert.equal(hiddenTestCases.length, 2);
+  assert.equal(hiddenTestCases[0].input, "12321");
+  assert.equal(hiddenTestCases[0].expectedOutput, "YES");
+  assert.equal(hiddenTestCases[1].input, "1234");
+  assert.equal(hiddenTestCases[1].expectedOutput, "NO");
+});
+
+test("Test Case Extraction: Preserves multiline pattern outputs in hidden test cases", () => {
+  const block = `Q5. Star Pyramid
+Print centered star pyramid.
+
+Sample Test Case 1:
+Input:
+2
+Output:
+ *
+***
+
+Hidden Test Case 1:
+Hidden Input:
+3
+Hidden Output:
+  *
+ ***
+*****`;
+
+  const structured = ruleBasedFallbackStructuring({
+    originalQuestionNumber: "Q5",
+    title: "Star Pyramid",
+    rawContent: block,
+  });
+
+  assert.equal(structured.sampleTestCases.length, 1);
+  assert.ok(structured.sampleTestCases[0].expectedOutput.includes("\n"));
+  assert.equal(structured.hiddenTestCases.length, 1);
+  assert.ok(structured.hiddenTestCases[0].expectedOutput.includes("\n"));
+  assert.equal(structured.hiddenTestCases[0].input, "3");
+  assert.equal(structured.hiddenTestCases[0].expectedOutput, "  *\n ***\n*****");
+  assert.equal(structured.hiddenTestCases[0].isHidden, true);
+});
+
+test("validateQuestionConfidence: Flags incomplete test cases with missing expected output", () => {
+  const incompleteQuestion = {
+    originalQuestionNumber: "Q6",
+    title: "Incomplete Question Example",
+    problemStatement: "A valid complete problem statement of sufficient length.",
+    contentType: "text",
+    sampleTestCases: [
+      {
+        input: "10 20",
+        expectedOutput: "", // Missing expected output!
+        isHidden: false,
+      },
+    ],
+    hiddenTestCases: [],
+  };
+
+  const validation = validateQuestionConfidence(incompleteQuestion);
+  assert.equal(validation.status, "needs_review");
+  assert.ok(validation.reviewReason.includes("missing expected output"));
+});
+
+test("ExamQuestion Schema: Validates testCases array with type and isHidden attributes", () => {
+  const mockExamId = "507f1f77bcf86cd799439011";
+  const question = new ExamQuestion({
+    examId: mockExamId,
+    questionNumber: "Q1",
+    title: "Sum Test",
+    problemStatement: "A problem statement that has sufficient length.",
+    testCases: [
+      {
+        type: "sample",
+        input: "1 2",
+        expectedOutput: "3",
+        isHidden: false,
+      },
+      {
+        type: "hidden",
+        input: "10 20",
+        expectedOutput: "30",
+        isHidden: true,
+      },
+    ],
+  });
+
+  const err = question.validateSync();
+  assert.equal(err, undefined);
+  assert.equal(question.testCases.length, 2);
+  assert.equal(question.testCases[0].type, "sample");
+  assert.equal(question.testCases[0].isHidden, false);
+  assert.equal(question.testCases[1].type, "hidden");
+  assert.equal(question.testCases[1].isHidden, true);
+});
+
+test("Strict Hidden Test Security: sanitizeExamCodeSubmissionForStudent strictly conceals hidden test cases", () => {
+  const submissionData = {
+    testCasesPassed: 2,
+    totalTestCases: 3,
+    testCaseResults: [
+      {
+        testCaseNumber: 1,
+        status: "passed",
+        executionTime: 12,
+        isHidden: false,
+        input: "2 3",
+        expectedOutput: "5",
+        actualOutput: "5",
+        error: "",
+      },
+      {
+        testCaseNumber: 2,
+        status: "passed",
+        executionTime: 14,
+        isHidden: true,
+        input: "-5 5",
+        expectedOutput: "0",
+        actualOutput: "0",
+        error: "",
+      },
+      {
+        testCaseNumber: 3,
+        status: "failed",
+        executionTime: 10,
+        isHidden: true,
+        input: "100 200",
+        expectedOutput: "300",
+        actualOutput: "299",
+        error: "Wrong answer",
+      },
+    ],
+  };
+
+  const sanitized = sanitizeExamCodeSubmissionForStudent(submissionData);
+
+  // Verify visible sample test case keeps input, expectedOutput, actualOutput
+  assert.equal(sanitized.testCases[0].isHidden, false);
+  assert.equal(sanitized.testCases[0].input, "2 3");
+  assert.equal(sanitized.testCases[0].expectedOutput, "5");
+  assert.equal(sanitized.testCases[0].actualOutput, "5");
+
+  // Verify hidden test case 2 strictly strips input, expectedOutput, and actualOutput
+  assert.equal(sanitized.testCases[1].isHidden, true);
+  assert.equal(sanitized.testCases[1].input, undefined);
+  assert.equal(sanitized.testCases[1].expectedOutput, undefined);
+  assert.equal(sanitized.testCases[1].actualOutput, undefined);
+  assert.equal(sanitized.testCases[1].visibility, "hidden");
+
+  // Verify hidden test case 3 strictly strips input, expectedOutput, and actualOutput
+  assert.equal(sanitized.testCases[2].isHidden, true);
+  assert.equal(sanitized.testCases[2].input, undefined);
+  assert.equal(sanitized.testCases[2].expectedOutput, undefined);
+  assert.equal(sanitized.testCases[2].actualOutput, undefined);
+  assert.equal(sanitized.testCases[2].visibility, "hidden");
+
+  // Verify aggregates are safe and correct
+  assert.equal(sanitized.summary.passedTests, 2);
+  assert.equal(sanitized.summary.failedTests, 1);
+  assert.equal(sanitized.summary.totalTests, 3);
+});
+
+test("Deterministic Judge Execution: Executes against both sample and hidden test cases", async () => {
+  const code = `#include <stdio.h>
+int main() {
+    int a, b;
+    if (scanf("%d %d", &a, &b) == 2) {
+        printf("%d\\n", a + b);
+    }
+    return 0;
+}`;
+
+  const testCases = [
+    { input: "1 2", expectedOutput: "3", isHidden: false },
+    { input: "10 20", expectedOutput: "30", isHidden: true },
+    { input: "-5 5", expectedOutput: "0", isHidden: true },
+  ];
+
+  const result = await judgeSubmission({
+    code,
+    testCases,
+    problemTitle: "Sum Test Execution",
+  });
+
+  assert.equal(result.status, "accepted");
+  assert.equal(result.testCasesPassed, 3);
+  assert.equal(result.totalTestCases, 3);
+  assert.equal(result.testCaseResults.length, 3);
+  assert.equal(result.testCaseResults[0].isHidden, false);
+  assert.equal(result.testCaseResults[1].isHidden, true);
+  assert.equal(result.testCaseResults[2].isHidden, true);
 });
 
 

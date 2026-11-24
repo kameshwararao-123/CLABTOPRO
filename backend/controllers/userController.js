@@ -3,6 +3,11 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { sendPasswordResetEmail } from "../services/emailService.js";
+import {
+  isValidCollegeEmail,
+  normalizeCollegeEmail,
+  REGISTRATION_RESTRICTION_MESSAGE,
+} from "../utils/collegeEmailValidator.js";
 
 
 // ================= REGISTER =================
@@ -24,13 +29,21 @@ export const registerController = async (req, res) => {
       });
     }
 
+    const normalizedEmail = normalizeCollegeEmail(email);
+
+    if (!isValidCollegeEmail(normalizedEmail)) {
+      return res.status(400).json({
+        message: REGISTRATION_RESTRICTION_MESSAGE,
+      });
+    }
+
     if (typeof password !== "string" || password.length < 6) {
       return res.status(400).json({
         message: "Password must be at least 6 characters long",
       });
     }
     // Check email
-    const isEmailExists = await User.findOne({ email });
+    const isEmailExists = await User.findOne({ email: normalizedEmail });
 
     if (isEmailExists) {
       return res.status(400).json({
@@ -39,7 +52,7 @@ export const registerController = async (req, res) => {
     }
 
     // Check roll number
-    const isRollNoExists = await User.findOne({ rollNo });
+    const isRollNoExists = await User.findOne({ rollNo: typeof rollNo === "string" ? rollNo.trim() : rollNo });
 
     if (isRollNoExists) {
       return res.status(400).json({
@@ -52,10 +65,10 @@ export const registerController = async (req, res) => {
 
     // Create user
     const user = await User.create({
-      username,
-      email,
+      username: typeof username === "string" ? username.trim() : username,
+      email: normalizedEmail,
       password: hashedPassword,
-      rollNo,
+      rollNo: typeof rollNo === "string" ? rollNo.trim() : rollNo,
       role: "student"
     });
 
@@ -75,7 +88,7 @@ export const registerController = async (req, res) => {
     console.log(error.message);
 
     res.status(500).json({
-      message: "Registration failed",
+      message: error?.message || "Registration failed",
     });
   }
 };
@@ -87,8 +100,16 @@ export const loginController = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Find user
-    const user = await User.findOne({ email });
+    if (!email || !password) {
+      return res.status(400).json({
+        message: "Email and password are required",
+      });
+    }
+
+    const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : email;
+
+    // Find user (existing users with any domain are permitted)
+    const user = await User.findOne({ email: normalizedEmail });
 
     if (!user) {
       return res.status(401).json({
@@ -148,7 +169,7 @@ export const loginController = async (req, res) => {
 
 export const forgotPasswordController = async (req, res) => {
   try {
-    const email = req.body?.email?.trim().toLowerCase();
+    const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
 
     if (!email) {
       return res.status(400).json({
@@ -157,6 +178,12 @@ export const forgotPasswordController = async (req, res) => {
     }
 
     const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({
+        message: "No account found with this email address",
+      });
+    }
 
     if (!user) {
       return res.status(404).json({

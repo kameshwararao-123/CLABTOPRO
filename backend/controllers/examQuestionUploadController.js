@@ -96,11 +96,14 @@ export const uploadExamQuestions = async (req, res, next) => {
     const job = await QuestionExtractionJob.create({
       examId: exam._id,
       facultyId: req.user.userId,
+      jobType: exam.examType === "viva" ? "viva_mcq" : "coding",
       fileName: req.file.originalname,
       fileType,
       fileSize: req.file.size,
       status: "pending",
-      progressMessage: "Document uploaded successfully. Starting background extraction...",
+      progressMessage: exam.examType === "viva"
+        ? "MCQ document uploaded. Starting background Viva MCQ extraction..."
+        : "Document uploaded successfully. Starting background extraction...",
       temporaryFilePath: req.file.path,
     });
 
@@ -259,12 +262,18 @@ export const updateExtractedQuestion = async (req, res, next) => {
     const allowedUpdates = [
       "title",
       "problemStatement",
+      "questionText",
+      "options",
+      "correctAnswer",
+      "explanation",
+      "questionType",
       "inputFormat",
       "outputFormat",
       "constraints",
       "difficulty",
       "marks",
       "sampleTestCases",
+      "hiddenTestCases",
       "status",
       "reviewReason",
       "originalQuestionNumber",
@@ -281,7 +290,25 @@ export const updateExtractedQuestion = async (req, res, next) => {
             expectedOutput: normalizeSampleContent(tc.expectedOutput || "", "output"),
             explanation: decodeHtmlEntities(tc.explanation || ""),
             isHidden: false,
+            type: "sample",
           }));
+        } else if (key === "hiddenTestCases" && Array.isArray(req.body[key])) {
+          job.extractedQuestions[questionIndex][key] = req.body[key].map((tc) => ({
+            input: normalizeSampleContent(tc.input || "", "input"),
+            expectedOutput: normalizeSampleContent(tc.expectedOutput || "", "output"),
+            explanation: decodeHtmlEntities(tc.explanation || ""),
+            isHidden: true,
+            type: "hidden",
+          }));
+        } else if (key === "options" && Array.isArray(req.body[key])) {
+          job.extractedQuestions[questionIndex][key] = req.body[key].map((opt, oIdx) => ({
+            optionId: String(opt.optionId || String.fromCharCode(65 + oIdx)).trim().toUpperCase(),
+            text: decodeHtmlEntities(opt.text || "").trim(),
+          }));
+        } else if (key === "questionText") {
+          const cleanText = cleanProblemStatement(req.body[key]);
+          job.extractedQuestions[questionIndex].questionText = cleanText;
+          job.extractedQuestions[questionIndex].problemStatement = cleanText;
         } else if (key === "problemStatement") {
           job.extractedQuestions[questionIndex][key] = cleanProblemStatement(req.body[key]);
         } else if (typeof req.body[key] === "string") {
@@ -425,13 +452,20 @@ export const saveExtractedQuestionsToExam = async (req, res, next) => {
     }
 
     // Filter questions that are ready to save (approved or successfully extracted)
-    const questionsToSave = job.extractedQuestions.filter(
+    let questionsToSave = job.extractedQuestions.filter(
       (q) => q.status === "approved" || q.status === "successfully_extracted"
     );
 
+    // Fallback: If faculty hasn't explicitly clicked "Approve All", save all non-failed extracted questions
+    if (questionsToSave.length === 0) {
+      questionsToSave = job.extractedQuestions.filter(
+        (q) => q.status !== "incomplete_extraction" && q.status !== "extraction_failed"
+      );
+    }
+
     if (questionsToSave.length === 0) {
       return res.status(400).json({
-        message: "No approved questions to save. Please review and approve questions first.",
+        message: "No valid extracted questions to save.",
       });
     }
 
@@ -439,44 +473,110 @@ export const saveExtractedQuestionsToExam = async (req, res, next) => {
 
     // Save in sequence to preserve question order and indexing
     for (const item of questionsToSave) {
-      const testCases = [
-        ...(item.sampleTestCases || []).map((tc) => ({
-          input: normalizeSampleContent(tc.input || "", "input"),
-          expectedOutput: normalizeSampleContent(tc.expectedOutput || "", "output"),
-          isHidden: false,
-          timeLimitMs: 3000,
-        })),
-        ...(item.hiddenTestCases || []).map((tc) => ({
-          input: normalizeSampleContent(tc.input || "", "input"),
-          expectedOutput: normalizeSampleContent(tc.expectedOutput || "", "output"),
-          isHidden: true,
-          timeLimitMs: 3000,
-        })),
-      ];
+      const isMCQ = job.jobType === "viva_mcq" || item.questionType === "mcq" || exam.examType === "viva";
 
-      const questionDoc = await ExamQuestion.create({
-        examId: exam._id,
-        questionNumber: item.originalQuestionNumber || `Q${item.orderIndex}`,
-        orderIndex: item.orderIndex || 0,
-        source: "bulk_extracted",
-        contentType: item.contentType || "text",
-        hasPatternOrMatrix: item.contentType === "pattern" || item.contentType === "matrix",
-        matrixData: item.matrixData || null,
-        title: decodeHtmlEntities(item.title.trim()),
-        problemStatement: cleanProblemStatement(item.problemStatement),
-        inputFormat: decodeHtmlEntities(item.inputFormat || ""),
-        outputFormat: decodeHtmlEntities(item.outputFormat || ""),
-        constraints: decodeHtmlEntities(item.constraints || ""),
-        difficulty: item.difficulty || "Medium",
-        marks: item.marks || 100,
-        testCases,
-        extractionMeta: {
-          jobId: job._id,
-          fileName: job.fileName,
-          originalQuestionNumber: item.originalQuestionNumber,
-          sourcePageNumber: item.sourcePageNumber || 1,
-        },
-      });
+      // Normalize difficulty to enum: "Easy" | "Medium" | "Hard"
+      let difficulty = "Medium";
+      if (item.difficulty) {
+        const d = String(item.difficulty).trim().toLowerCase();
+        if (d.includes("easy")) difficulty = "Easy";
+        else if (d.includes("hard")) difficulty = "Hard";
+        else difficulty = "Medium";
+      }
+
+      // Normalize extractionStatus to enum
+      let extractionStatus = "approved";
+      if (
+        item.status === "needs_review" ||
+        item.extractionStatus === "Needs Review" ||
+        !item.correctAnswer ||
+        item.correctAnswer === "Answer Not Provided"
+      ) {
+        extractionStatus = "needs_review";
+      }
+
+      let questionDoc;
+      if (isMCQ) {
+        const cleanQuestionText = (item.questionText || item.problemStatement || item.rawContent || "").trim();
+        const cleanTitle = decodeHtmlEntities(
+          item.title || cleanQuestionText.slice(0, 80).replace(/\n+/g, " ") || `Question ${item.orderIndex || 1}`
+        );
+
+        questionDoc = await ExamQuestion.create({
+          examId: exam._id,
+          questionType: "mcq",
+          questionNumber: item.originalQuestionNumber || `Q${item.orderIndex || 1}`,
+          orderIndex: item.orderIndex || 0,
+          source: "bulk_extracted",
+          title: cleanTitle,
+          problemStatement: cleanQuestionText,
+          questionText: cleanQuestionText,
+          options: (item.options || []).map((opt, oIdx) => ({
+            optionId: (opt.optionId || String.fromCharCode(65 + oIdx)).toUpperCase(),
+            text: opt.text || "",
+          })),
+          correctAnswer: item.correctAnswer || "Answer Not Provided",
+          explanation: item.explanation || "",
+          difficulty,
+          marks: Number(item.marks) || Number(exam.marksPerQuestion) || 1,
+          negativeMarks: item.negativeMarks ?? (exam.negativeMarkingEnabled ? Number(exam.negativeMarking) || 0 : 0),
+          extractionStatus,
+          testCases: [],
+          extractionMeta: {
+            jobId: job._id,
+            fileName: job.fileName,
+            originalQuestionNumber: item.originalQuestionNumber,
+            sourcePageNumber: item.sourcePageNumber || 1,
+          },
+        });
+      } else {
+        const cleanProblem = cleanProblemStatement(item.problemStatement || item.questionText || "");
+        const cleanTitle = decodeHtmlEntities(
+          (item.title || cleanProblem.slice(0, 80).replace(/\n+/g, " ") || `Question ${item.orderIndex || 1}`).trim()
+        );
+
+        const testCases = [
+          ...(item.sampleTestCases || []).map((tc) => ({
+            type: "sample",
+            input: normalizeSampleContent(tc.input || "", "input"),
+            expectedOutput: normalizeSampleContent(tc.expectedOutput || "", "output"),
+            isHidden: false,
+            timeLimitMs: 3000,
+          })),
+          ...(item.hiddenTestCases || []).map((tc) => ({
+            type: "hidden",
+            input: normalizeSampleContent(tc.input || "", "input"),
+            expectedOutput: normalizeSampleContent(tc.expectedOutput || "", "output"),
+            isHidden: true,
+            timeLimitMs: 3000,
+          })),
+        ];
+
+        questionDoc = await ExamQuestion.create({
+          examId: exam._id,
+          questionType: "coding",
+          questionNumber: item.originalQuestionNumber || `Q${item.orderIndex || 1}`,
+          orderIndex: item.orderIndex || 0,
+          source: "bulk_extracted",
+          contentType: item.contentType || "text",
+          hasPatternOrMatrix: item.contentType === "pattern" || item.contentType === "matrix",
+          matrixData: item.matrixData || null,
+          title: cleanTitle,
+          problemStatement: cleanProblem,
+          inputFormat: decodeHtmlEntities(item.inputFormat || ""),
+          outputFormat: decodeHtmlEntities(item.outputFormat || ""),
+          constraints: decodeHtmlEntities(item.constraints || ""),
+          difficulty,
+          marks: Number(item.marks) || 100,
+          testCases,
+          extractionMeta: {
+            jobId: job._id,
+            fileName: job.fileName,
+            originalQuestionNumber: item.originalQuestionNumber,
+            sourcePageNumber: item.sourcePageNumber || 1,
+          },
+        });
+      }
 
       savedQuestionDocs.push(questionDoc._id);
     }

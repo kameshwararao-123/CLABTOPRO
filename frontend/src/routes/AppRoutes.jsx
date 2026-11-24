@@ -31,6 +31,7 @@ const ExamAssignedQuestion = lazy(() => import("../pages/student/ExamAssignedQue
 const ExamPaperNotepad = lazy(() => import("../pages/student/ExamPaperNotepad"));
 const ExamCodeEditorPage = lazy(() => import("../pages/student/ExamCodeEditorPage"));
 const ExamCompleted = lazy(() => import("../pages/student/ExamCompleted"));
+const StudentVivaExamPage = lazy(() => import("../pages/student/StudentVivaExamPage"));
 
 // Admin pages
 const AdminDashboard = lazy(() => import("../pages/admin/AdminDashboard"));
@@ -154,6 +155,14 @@ const AppRoutes = () => {
           element={
             <ProtectedRoute>
               <ExamCompleted />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/exams/:examId/viva"
+          element={
+            <ProtectedRoute>
+              <StudentVivaExamPage />
             </ProtectedRoute>
           }
         />

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import {
   FileText,
   Clock,
@@ -13,11 +13,14 @@ import {
   ShieldAlert,
   RotateCcw,
   BookOpen,
+  Send,
+  AlertCircle,
+  RefreshCw,
 } from "lucide-react";
 import {
   getMyAssignedQuestion,
   autosaveAnswerDraft,
-  evaluatePaperAnswer,
+  submitPaperAnswer,
 } from "../../services/examService";
 import Loader from "../../components/common/Loader";
 
@@ -41,51 +44,74 @@ const PAPER_TEMPLATE = `1. ALGORITHMIC APPROACH:
 
 const ExamPaperNotepad = () => {
   const { examId } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
 
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
   const [answerText, setAnswerText] = useState("");
   const [saveStatus, setSaveStatus] = useState("idle"); // idle | saving | saved
-  const [evaluating, setEvaluating] = useState(false);
-  const [evaluationResult, setEvaluationResult] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [successMsg, setSuccessMsg] = useState("");
   const [showQuestionPanel, setShowQuestionPanel] = useState(true);
   const [timeLeftStr, setTimeLeftStr] = useState("");
 
   const autosaveTimerRef = useRef(null);
+  const currentQId = searchParams.get("questionId");
 
-  // Load question and initial draft
-  const fetchData = async () => {
+  // Load question, current progress, and answer draft
+  const fetchData = async (qId, isSilent = false) => {
     try {
-      setLoading(true);
-      setErrorMsg("");
-      const res = await getMyAssignedQuestion(examId);
+      if (!isSilent) {
+        setLoading(true);
+        setErrorMsg("");
+      }
+      const params = qId ? { questionId: qId } : currentQId ? { questionId: currentQId } : {};
+      const res = await getMyAssignedQuestion(examId, params);
       setData(res);
 
-      if (res.progress?.lastConceptualAnswer) {
-        setAnswerText(res.progress.lastConceptualAnswer);
+      const prog = res.progress || {};
+      const isLockedFromEditing =
+        prog.compilerAllowed ||
+        prog.status === "awaiting_faculty_evaluation" ||
+        prog.conceptualStatus === "submitted" ||
+        prog.status === "evaluating" ||
+        prog.status === "waiting_faculty_decision";
+
+      // Only update local answerText if initial load or if locked (viewing submitted copy)
+      // or if user hasn't typed anything yet
+      if (!isSilent || isLockedFromEditing || !answerText.trim()) {
+        if (prog.lastConceptualAnswer) {
+          setAnswerText(prog.lastConceptualAnswer);
+        }
       }
-      if (res.progress?.lastAIEvaluation) {
-        setEvaluationResult({
-          isApproved: res.progress.compilerAllowed,
-          errorPercentage: res.progress.lastAIEvaluation.errorPercentage,
-          compilerAllowed: res.progress.compilerAllowed,
-          attemptNumber: res.progress.conceptualAttemptsCount,
-          maxAttempts: res.exam.maxConceptualAttempts,
-          evaluation: res.progress.lastAIEvaluation,
-        });
+
+      if (res.question?._id && res.question._id !== currentQId) {
+        setSearchParams({ questionId: res.question._id });
       }
     } catch (err) {
-      setErrorMsg(err.response?.data?.message || "Failed to load examination question.");
+      if (!isSilent) {
+        setErrorMsg(err.response?.data?.message || "Failed to load examination question.");
+      }
     } finally {
-      setLoading(false);
+      if (!isSilent) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    fetchData();
-  }, [examId]);
+    fetchData(currentQId, false);
+  }, [examId, currentQId]);
+
+  // Live auto-polling every 4 seconds to detect faculty evaluations & decisions
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchData(currentQId, true);
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [examId, currentQId]);
 
   // Exam Countdown Timer
   useEffect(() => {
@@ -123,13 +149,13 @@ const ExamPaperNotepad = () => {
       if (!text || !text.trim()) return;
       try {
         setSaveStatus("saving");
-        await autosaveAnswerDraft(examId, text);
+        await autosaveAnswerDraft(examId, text, data?.question?._id);
         setSaveStatus("saved");
       } catch (err) {
         setSaveStatus("idle");
       }
     },
-    [examId]
+    [examId, data?.question?._id]
   );
 
   // Debounced Autosave
@@ -144,6 +170,13 @@ const ExamPaperNotepad = () => {
     }, 4000);
   };
 
+  const handleSelectQuestion = async (qId) => {
+    if (answerText.trim()) {
+      await triggerAutosave(answerText);
+    }
+    setSearchParams({ questionId: qId });
+  };
+
   const handleInsertTemplate = () => {
     if (answerText.trim() && !window.confirm("Insert template? Existing content will be prepended.")) {
       return;
@@ -151,24 +184,25 @@ const ExamPaperNotepad = () => {
     setAnswerText((prev) => (prev.trim() ? `${PAPER_TEMPLATE}\n\n${prev}` : PAPER_TEMPLATE));
   };
 
-  const handleEvaluateSubmit = async () => {
-    if (!answerText.trim() || answerText.trim().length < 40) {
-      setErrorMsg("Please write a detailed conceptual solution (minimum 40 characters) before requesting AI evaluation.");
+  // Student Submits Conceptual Answer (NO automatic AI evaluation, NO auto redirect)
+  const handleSubmitConceptualAnswer = async () => {
+    if (!answerText.trim() || answerText.trim().length < 20) {
+      setErrorMsg("Please write a detailed conceptual solution (minimum 20 characters) before submitting.");
       return;
     }
 
     try {
-      setEvaluating(true);
+      setSubmitting(true);
       setErrorMsg("");
-      setEvaluationResult(null);
+      setSuccessMsg("");
 
-      const res = await evaluatePaperAnswer(examId, answerText);
-      setEvaluationResult(res);
-      await fetchData();
+      const res = await submitPaperAnswer(examId, answerText, data?.question?._id);
+      setSuccessMsg(res.message || "Conceptual answer submitted successfully.");
+      await fetchData(data?.question?._id, false);
     } catch (err) {
-      setErrorMsg(err.response?.data?.message || "AI evaluation failed. Please try again.");
+      setErrorMsg(err.response?.data?.message || "Failed to submit conceptual answer. Please try again.");
     } finally {
-      setEvaluating(false);
+      setSubmitting(false);
     }
   };
 
@@ -193,11 +227,27 @@ const ExamPaperNotepad = () => {
   }
 
   const { exam, question, progress } = data;
-  const isCompilerUnlocked = progress?.compilerAllowed || evaluationResult?.compilerAllowed;
   const wordCount = answerText.trim() ? answerText.trim().split(/\s+/).length : 0;
   const charCount = answerText.length;
   const maxAttempts = exam.maxConceptualAttempts || 3;
   const currentAttempts = progress?.conceptualAttemptsCount || 0;
+
+  // Workflow State Flags
+  const isCompilerUnlocked = Boolean(progress?.compilerAllowed);
+  const isAwaitingFaculty =
+    !isCompilerUnlocked &&
+    (progress?.status === "awaiting_faculty_evaluation" ||
+      progress?.conceptualStatus === "submitted" ||
+      progress?.status === "evaluating" ||
+      progress?.conceptualStatus === "evaluating" ||
+      progress?.status === "waiting_faculty_decision");
+
+  const isCorrectionRequired =
+    !isCompilerUnlocked &&
+    !isAwaitingFaculty &&
+    (progress?.status === "notepad_correction_required" ||
+      progress?.conceptualStatus === "correction_required" ||
+      progress?.status === "conceptual_evaluation_failed");
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
@@ -248,18 +298,62 @@ const ExamPaperNotepad = () => {
           {/* Compiler Gate Status Badge */}
           {isCompilerUnlocked ? (
             <button
-              onClick={() => navigate(`/exams/${examId}/editor`)}
+              onClick={() => navigate(`/exams/${examId}/editor?questionId=${question._id}`)}
               className="inline-flex items-center gap-2 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold shadow-md transition"
             >
               <Code2 className="w-4 h-4" /> Go to Code Editor
             </button>
+          ) : isAwaitingFaculty ? (
+            <div className="hidden md:flex items-center gap-1.5 text-xs text-amber-400 bg-amber-950/40 border border-amber-800/40 px-2.5 py-1 rounded-lg font-semibold">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+              </span>
+              <span>Awaiting Faculty Review</span>
+            </div>
           ) : (
             <div className="hidden md:flex items-center gap-1 text-xs text-amber-400 bg-amber-950/40 border border-amber-800/40 px-2.5 py-1 rounded-lg">
-              <span>Compiler: Locked (&lt;50% error required)</span>
+              <span>Compiler: Locked (Faculty Approval Required)</span>
             </div>
           )}
         </div>
       </header>
+
+      {/* Multi-Question Selector Bar (when assigned questions > 1) */}
+      {data.questions && data.questions.length > 1 && (
+        <div className="bg-slate-900 border-b border-slate-800 px-4 sm:px-6 py-2 flex items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-2 overflow-x-auto py-0.5">
+            <span className="text-slate-400 font-bold uppercase tracking-wider text-[11px] whitespace-nowrap">
+              Questions ({data.questions.length}):
+            </span>
+            {data.questions.map((qItem, idx) => {
+              const isActive = qItem._id === question._id || (data.currentIndex ?? 0) === idx;
+              return (
+                <button
+                  key={qItem._id || idx}
+                  type="button"
+                  onClick={() => handleSelectQuestion(qItem._id)}
+                  className={`px-3 py-1 rounded-lg font-bold text-xs transition flex items-center gap-1.5 whitespace-nowrap ${
+                    isActive
+                      ? "bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-400"
+                      : "bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white"
+                  }`}
+                >
+                  <span>{qItem.questionNumber || `Q${idx + 1}`}</span>
+                  {qItem.isCompleted ? (
+                    <span className="text-emerald-400 font-bold">✓</span>
+                  ) : qItem.compilerAllowed ? (
+                    <span className="text-emerald-400 text-[10px]">●</span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+          <div className="text-slate-400 font-medium whitespace-nowrap hidden sm:block">
+            Question {(data.currentIndex ?? 0) + 1} of {data.questions.length}
+          </div>
+        </div>
+      )}
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
@@ -296,34 +390,6 @@ const ExamPaperNotepad = () => {
               <p className="text-xs font-mono text-slate-300 bg-slate-950 p-2.5 rounded-lg border border-slate-800">
                 {question.constraints}
               </p>
-            </div>
-          )}
-
-          {/* Structured Matrix Grid if present */}
-          {question.matrixData?.values && Array.isArray(question.matrixData.values) && (
-            <div className="space-y-1.5">
-              <span className="text-[11px] font-bold text-indigo-400 uppercase">
-                Matrix Grid ({question.matrixData.rows} × {question.matrixData.columns})
-              </span>
-              <div className="overflow-x-auto p-2 bg-slate-950 rounded-lg border border-indigo-900/40 inline-block">
-                <table className="border-collapse font-mono text-xs text-center">
-                  <tbody>
-                    {question.matrixData.values.map((row, rIdx) => (
-                      <tr key={rIdx} className="border-b border-slate-800 last:border-b-0">
-                        {Array.isArray(row) &&
-                          row.map((cell, cIdx) => (
-                            <td
-                              key={cIdx}
-                              className="px-3 py-1 text-indigo-300 font-bold border-r border-slate-800 last:border-r-0"
-                            >
-                              {cell}
-                            </td>
-                          ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
             </div>
           )}
 
@@ -364,197 +430,312 @@ const ExamPaperNotepad = () => {
           </div>
         </div>
 
-        {/* Right Side: The Paper Writing Notepad */}
+        {/* Right Side: Notepad / Waiting State / Unlocked State */}
         <div className="flex-1 flex flex-col bg-slate-950 overflow-hidden">
-          {/* Notepad Toolbar */}
-          <div className="bg-slate-900/90 border-b border-slate-800 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowQuestionPanel(!showQuestionPanel)}
-                className="text-xs px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
-              >
-                {showQuestionPanel ? "Hide Question Panel" : "Show Question Panel"}
-              </button>
-
-              <button
-                onClick={handleInsertTemplate}
-                className="text-xs px-2.5 py-1 rounded bg-indigo-950/60 hover:bg-indigo-900 text-indigo-300 border border-indigo-800 transition"
-              >
-                Insert Section Template
-              </button>
-
-              <button
-                onClick={() => {
-                  if (window.confirm("Clear paper answer draft?")) {
-                    setAnswerText("");
-                  }
-                }}
-                className="text-xs px-2 py-1 text-slate-400 hover:text-rose-400"
-                title="Clear notepad"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-              </button>
-            </div>
-
-            <div className="flex items-center gap-3 text-xs text-slate-400">
-              <span>{wordCount} Words</span>
-              <span>•</span>
-              <span>{charCount} Characters</span>
-              <span>•</span>
-              <span className="font-semibold text-slate-300">
-                Attempt {currentAttempts} of {maxAttempts}
-              </span>
-            </div>
-          </div>
-
-          {/* Error Banner */}
-          {errorMsg && (
-            <div className="bg-rose-950/60 border-b border-rose-800/60 px-4 py-2.5 text-xs text-rose-300 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-                <span>{errorMsg}</span>
+          {/* SCENARIO 1: CODE EDITOR UNLOCKED */}
+          {isCompilerUnlocked ? (
+            <div className="flex-1 overflow-y-auto p-6 sm:p-12 flex flex-col items-center justify-center text-center space-y-6">
+              <div className="w-20 h-20 rounded-3xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shadow-xl shadow-emerald-500/5">
+                <CheckCircle2 className="w-10 h-10" />
               </div>
-              <button onClick={() => setErrorMsg("")} className="text-rose-400 hover:text-white">
-                &times;
+
+              <div className="max-w-md space-y-2">
+                <h2 className="text-2xl font-bold text-white tracking-tight">
+                  Approved – Code Editor Unlocked!
+                </h2>
+                <p className="text-sm text-slate-400 leading-relaxed">
+                  Your conceptual solution has been reviewed and approved by faculty. You are authorized to proceed to the programming environment.
+                </p>
+              </div>
+
+              <button
+                onClick={() => navigate(`/exams/${examId}/editor?questionId=${question._id}`)}
+                className="inline-flex items-center gap-2.5 px-8 py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-sm font-bold shadow-xl shadow-emerald-600/30 transition transform hover:-translate-y-0.5"
+              >
+                <Code2 className="w-5 h-5" />
+                <span>Proceed to Code Editor</span>
+                <ArrowRight className="w-4 h-4" />
               </button>
+
+              <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 text-left w-full max-w-lg space-y-2 mt-4">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-400 block">
+                  Approved Conceptual Answer:
+                </span>
+                <div className="font-mono text-xs text-slate-300 max-h-48 overflow-y-auto whitespace-pre-wrap">
+                  {progress?.lastConceptualAnswer || answerText}
+                </div>
+              </div>
             </div>
-          )}
+          ) : isAwaitingFaculty ? (
+            /* SCENARIO 2: WAITING FOR FACULTY EVALUATION / DECISION */
+            <div className="flex-1 overflow-y-auto p-6 sm:p-10 flex flex-col items-center justify-center text-center space-y-6">
+              <div className="relative">
+                <div className="w-20 h-20 rounded-3xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-xl shadow-amber-500/5">
+                  <Clock className="w-10 h-10 animate-pulse" />
+                </div>
+                <span className="absolute -top-1 -right-1 flex h-4 w-4">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-4 w-4 bg-amber-500"></span>
+                </span>
+              </div>
 
-          {/* Notepad Textarea */}
-          <div className="flex-1 relative p-4 flex flex-col">
-            <textarea
-              value={answerText}
-              onChange={handleTextChange}
-              placeholder="Write your comprehensive conceptual solution here...
-- Explain your algorithmic approach in clear logical steps.
-- Describe data structures and why they were chosen.
-- Detail edge case handling and constraints.
-- Provide time and space complexity analysis."
-              className="w-full flex-1 bg-slate-950 text-slate-100 placeholder-slate-600 font-mono text-sm leading-relaxed p-4 rounded-xl border border-slate-800 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 resize-none shadow-inner"
-            />
-          </div>
+              <div className="max-w-lg space-y-2">
+                <h2 className="text-2xl font-bold text-white tracking-tight">
+                  Conceptual Answer Submitted Successfully
+                </h2>
+                <p className="text-sm text-slate-400 leading-relaxed">
+                  Your answer has been submitted and is waiting for faculty evaluation. Please wait until your faculty reviews your answer.
+                </p>
+              </div>
 
-          {/* AI Evaluation Result Banner / Section */}
-          {evaluationResult && (
-            <div
-              className={`mx-4 mb-4 p-4 rounded-2xl border ${
-                evaluationResult.isApproved
-                  ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-200"
-                  : "bg-rose-950/40 border-rose-500/40 text-rose-200"
-              } shadow-lg space-y-3 animate-fade-in`}
-            >
-              <div className="flex items-start justify-between">
+              {/* Status Badges Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-xl text-left">
+                <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+                  <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
+                    Submission Status
+                  </span>
+                  <span className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Submitted
+                  </span>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+                  <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
+                    Evaluation Status
+                  </span>
+                  <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5">
+                    {progress?.status === "evaluating" ? (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5 animate-spin" /> AI Evaluation in Progress
+                      </>
+                    ) : progress?.status === "waiting_faculty_decision" ? (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5" /> Waiting for Faculty Decision
+                      </>
+                    ) : (
+                      <>
+                        <Clock className="w-3.5 h-3.5" /> Awaiting Faculty Evaluation
+                      </>
+                    )}
+                  </span>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+                  <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
+                    Exam Status
+                  </span>
+                  <span className="text-xs font-bold text-indigo-400 flex items-center gap-1.5">
+                    <ShieldAlert className="w-3.5 h-3.5" /> Waiting for Faculty Approval
+                  </span>
+                </div>
+              </div>
+
+              {/* Live Polling Indicator */}
+              <div className="inline-flex items-center gap-2 text-xs text-slate-400 bg-slate-900/80 px-4 py-2 rounded-full border border-slate-800">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+                <span>Auto-refreshing status every 4 seconds. No page refresh needed.</span>
+              </div>
+
+              {/* Read-only Submitted Answer Preview */}
+              <div className="w-full max-w-xl text-left space-y-2">
+                <div className="flex items-center justify-between text-xs text-slate-400">
+                  <span className="font-semibold uppercase tracking-wider text-[11px]">
+                    Submitted Conceptual Answer (Locked)
+                  </span>
+                  <span>Attempt #{progress?.conceptualAttemptsCount || 1}</span>
+                </div>
+                <div className="max-h-60 overflow-y-auto p-4 rounded-xl bg-slate-900 border border-slate-800 font-mono text-xs text-slate-300 whitespace-pre-wrap leading-relaxed">
+                  {progress?.lastConceptualAnswer || answerText}
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* SCENARIO 3: ACTIVE NOTEPAD (INITIAL DRAFT OR CORRECTION REQUIRED) */
+            <>
+              {/* Notepad Toolbar */}
+              <div className="bg-slate-900/90 border-b border-slate-800 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  {evaluationResult.isApproved ? (
-                    <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                  ) : (
-                    <ShieldAlert className="w-5 h-5 text-rose-400" />
-                  )}
-                  <div>
-                    <h3 className="text-sm font-bold">
-                      {evaluationResult.isApproved
-                        ? "Conceptual Evaluation Passed! Compiler Unlocked"
-                        : `Evaluation Error: ${evaluationResult.errorPercentage}% (Threshold: < 50%)`}
-                    </h3>
-                    <p className="text-xs opacity-90 mt-0.5">
-                      {evaluationResult.message}
-                    </p>
-                  </div>
+                  <button
+                    onClick={() => setShowQuestionPanel(!showQuestionPanel)}
+                    className="text-xs px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
+                  >
+                    {showQuestionPanel ? "Hide Question Panel" : "Show Question Panel"}
+                  </button>
+
+                  <button
+                    onClick={handleInsertTemplate}
+                    className="text-xs px-2.5 py-1 rounded bg-indigo-950/60 hover:bg-indigo-900 text-indigo-300 border border-indigo-800 transition"
+                  >
+                    Insert Section Template
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      if (window.confirm("Clear paper answer draft?")) {
+                        setAnswerText("");
+                      }
+                    }}
+                    className="text-xs px-2 py-1 text-slate-400 hover:text-rose-400"
+                    title="Clear notepad"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
                 </div>
 
-                {evaluationResult.isApproved && (
-                  <button
-                    onClick={() => navigate(`/exams/${examId}/editor`)}
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md transition"
-                  >
-                    <span>Proceed to Code Editor</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                )}
+                <div className="flex items-center gap-3 text-xs text-slate-400">
+                  <span>{wordCount} Words</span>
+                  <span>•</span>
+                  <span>{charCount} Characters</span>
+                  <span>•</span>
+                  <span className="font-semibold text-slate-300">
+                    Attempt {currentAttempts} of {maxAttempts}
+                  </span>
+                </div>
               </div>
 
-              {/* Rubric Breakdown */}
-              {evaluationResult.evaluation?.rubricBreakdown && (
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs pt-2 border-t border-slate-800">
-                  <div className="p-2 bg-slate-900/60 rounded-lg">
-                    <span className="text-[10px] text-slate-400 block">Syntax</span>
-                    <span className="font-bold text-white">
-                      {evaluationResult.evaluation.rubricBreakdown.syntaxStructure?.score}/20
-                    </span>
+              {/* Correction Required Banner (if faculty returned answer) */}
+              {isCorrectionRequired && (
+                <div className="bg-amber-950/60 border-b border-amber-800/80 px-4 py-3 text-xs text-amber-200 space-y-2">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <div className="font-bold text-amber-300 text-sm">
+                        Your Conceptual Answer Requires Improvement
+                      </div>
+                      <p className="text-amber-200/90">
+                        {progress?.facultyFeedback ||
+                          "Your conceptual answer requires improvement. Please review the faculty feedback and correct your answer before resubmitting."}
+                      </p>
+                    </div>
                   </div>
-                  <div className="p-2 bg-slate-900/60 rounded-lg">
-                    <span className="text-[10px] text-slate-400 block">Logic</span>
-                    <span className="font-bold text-white">
-                      {evaluationResult.evaluation.rubricBreakdown.logicCorrectness?.score}/30
-                    </span>
-                  </div>
-                  <div className="p-2 bg-slate-900/60 rounded-lg">
-                    <span className="text-[10px] text-slate-400 block">Algorithm</span>
-                    <span className="font-bold text-white">
-                      {evaluationResult.evaluation.rubricBreakdown.algorithmicApproach?.score}/25
-                    </span>
-                  </div>
-                  <div className="p-2 bg-slate-900/60 rounded-lg">
-                    <span className="text-[10px] text-slate-400 block">Efficiency</span>
-                    <span className="font-bold text-white">
-                      {evaluationResult.evaluation.rubricBreakdown.codeEfficiency?.score}/15
-                    </span>
-                  </div>
-                  <div className="p-2 bg-slate-900/60 rounded-lg">
-                    <span className="text-[10px] text-slate-400 block">Constraints</span>
-                    <span className="font-bold text-white">
-                      {evaluationResult.evaluation.rubricBreakdown.constraintsHandling?.score}/10
-                    </span>
-                  </div>
-                </div>
-              )}
 
-              {/* Identified Issues & Hints */}
-              {!evaluationResult.isApproved && evaluationResult.evaluation?.identifiedMistakes?.length > 0 && (
-                <div className="text-xs space-y-1 bg-slate-900/80 p-3 rounded-xl border border-rose-900/50">
-                  <span className="font-bold text-rose-300 block">Areas for Conceptual Revision:</span>
-                  <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
-                    {evaluationResult.evaluation.identifiedMistakes.map((issue, idx) => (
-                      <li key={idx}>{issue}</li>
-                    ))}
-                  </ul>
-                  {evaluationResult.evaluation?.conceptualHints?.length > 0 && (
-                    <div className="mt-2 text-indigo-300 font-medium">
-                      💡 <strong>Hint:</strong> {evaluationResult.evaluation.conceptualHints.join("; ")}
+                  {/* Previous AI Evaluation Report / Missing Concepts */}
+                  {progress?.lastAIEvaluation && (
+                    <div className="mt-2 p-3 rounded-xl bg-slate-900/90 border border-amber-900/50 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 rounded-md font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                          Error Percentage: {progress.lastAIEvaluation.errorPercentage}% (Threshold: &lt;50%)
+                        </span>
+                        {progress.lastAIEvaluation.understandingPercentage !== undefined && (
+                          <span className="px-2 py-0.5 rounded-md font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                            Understanding: {progress.lastAIEvaluation.understandingPercentage}%
+                          </span>
+                        )}
+                      </div>
+
+                      {progress.lastAIEvaluation.missingConcepts?.length > 0 && (
+                        <div>
+                          <span className="text-[11px] font-bold text-rose-300 uppercase block">
+                            Missing Concepts:
+                          </span>
+                          <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
+                            {progress.lastAIEvaluation.missingConcepts.map((mc, idx) => (
+                              <li key={idx}>{mc}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {progress.lastAIEvaluation.suggestions?.length > 0 && (
+                        <div>
+                          <span className="text-[11px] font-bold text-indigo-300 uppercase block">
+                            Suggestions for Improvement:
+                          </span>
+                          <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
+                            {progress.lastAIEvaluation.suggestions.map((sug, idx) => (
+                              <li key={idx}>{sug}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
               )}
-            </div>
+
+              {/* Error Banner */}
+              {errorMsg && (
+                <div className="bg-rose-950/60 border-b border-rose-800/60 px-4 py-2.5 text-xs text-rose-300 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                    <span>{errorMsg}</span>
+                  </div>
+                  <button onClick={() => setErrorMsg("")} className="text-rose-400 hover:text-white">
+                    &times;
+                  </button>
+                </div>
+              )}
+
+              {/* Success Banner */}
+              {successMsg && (
+                <div className="bg-emerald-950/60 border-b border-emerald-800/60 px-4 py-2.5 text-xs text-emerald-300 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                    <span>{successMsg}</span>
+                  </div>
+                  <button onClick={() => setSuccessMsg("")} className="text-emerald-400 hover:text-white">
+                    &times;
+                  </button>
+                </div>
+              )}
+
+              {/* Notepad Textarea */}
+              <div className="flex-1 relative p-4 flex flex-col">
+                <textarea
+                  value={answerText}
+                  onChange={handleTextChange}
+                  placeholder="Write your comprehensive conceptual solution here...
+- Explain your algorithmic approach in clear logical steps.
+- Describe data structures and why they were chosen.
+- Detail edge case handling and constraints.
+- Provide time and space complexity analysis."
+                  className="w-full flex-1 bg-slate-950 text-slate-100 placeholder-slate-600 font-mono text-sm leading-relaxed p-4 rounded-xl border border-slate-800 focus:outline-hidden focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 resize-none shadow-inner"
+                />
+              </div>
+
+              {/* Bottom Action Footer */}
+              <div className="bg-slate-900 border-t border-slate-800 px-4 py-3 flex items-center justify-between">
+                <Link
+                  to={`/exams/${examId}/question`}
+                  className="text-xs text-slate-400 hover:text-slate-200 transition"
+                >
+                  ← Back to Question
+                </Link>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => triggerAutosave(answerText)}
+                    className="px-3 py-2 text-xs font-semibold text-slate-300 hover:text-white border border-slate-700 rounded-xl hover:bg-slate-800 transition"
+                  >
+                    Save Draft Now
+                  </button>
+
+                  <button
+                    onClick={handleSubmitConceptualAnswer}
+                    disabled={submitting || !answerText.trim() || currentAttempts >= maxAttempts}
+                    className="inline-flex items-center gap-2 px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-600/30 disabled:opacity-40 disabled:cursor-not-allowed transition transform active:scale-95"
+                  >
+                    {submitting ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin text-indigo-200" />
+                        <span>Submitting Answer...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-4 h-4 text-indigo-200" />
+                        <span>
+                          {isCorrectionRequired ? "Resubmit Corrected Answer" : "Submit Conceptual Answer"}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </>
           )}
-
-          {/* Bottom Action Footer */}
-          <div className="bg-slate-900 border-t border-slate-800 px-4 py-3 flex items-center justify-between">
-            <Link
-              to={`/exams/${examId}/question`}
-              className="text-xs text-slate-400 hover:text-slate-200 transition"
-            >
-              ← Back to Question
-            </Link>
-
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => triggerAutosave(answerText)}
-                className="px-3 py-2 text-xs font-semibold text-slate-300 hover:text-white border border-slate-700 rounded-xl hover:bg-slate-800 transition"
-              >
-                Save Draft Now
-              </button>
-
-              <button
-                onClick={handleEvaluateSubmit}
-                disabled={evaluating || !answerText.trim()}
-                className="inline-flex items-center gap-2 px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-600/30 disabled:opacity-40 disabled:cursor-not-allowed transition transform active:scale-95"
-              >
-                <Sparkles className="w-4 h-4 text-indigo-200" />
-                <span>{evaluating ? "Evaluating Conceptual Solution..." : "Evaluate Paper Answer"}</span>
-              </button>
-            </div>
-          </div>
         </div>
       </div>
     </div>

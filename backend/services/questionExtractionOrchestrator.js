@@ -1,6 +1,8 @@
 import QuestionExtractionJob from "../models/QuestionExtractionJob.js";
-import { parseDocumentQuestions } from "./questionParserService.js";
+import { parseDocumentQuestions, extractTextFromPdf } from "./questionParserService.js";
 import { extractQuestionBatchWithGemini } from "./questionExtractorAIService.js";
+import { splitRawTextIntoMCQBlocks } from "./mcqParserService.js";
+import { extractMCQBatchWithGemini } from "./mcqExtractorAIService.js";
 
 const BATCH_SIZE = 15; // 10-20 questions per batch for safe token usage & fast parallelization
 
@@ -17,20 +19,34 @@ export const runQuestionExtractionJob = async (jobId) => {
       return;
     }
 
+    const isVivaMCQ = job.jobType === "viva_mcq";
+
     // Phase 1: Parse Document Text & Identify Question Boundaries
     job.status = "parsing_document";
-    job.progressMessage = `Parsing ${job.fileName} and detecting question boundaries...`;
+    job.progressMessage = isVivaMCQ
+      ? `Parsing ${job.fileName} and identifying Viva Multiple Choice Questions (MCQs)...`
+      : `Parsing ${job.fileName} and detecting question boundaries...`;
     await job.save();
 
-    const rawQuestionBlocks = await parseDocumentQuestions(
-      job.temporaryFilePath,
-      job.fileType
-    );
+    let rawQuestionBlocks = [];
+    if (isVivaMCQ) {
+      const pdfTextResult = await extractTextFromPdf(job.temporaryFilePath);
+      rawQuestionBlocks = splitRawTextIntoMCQBlocks(pdfTextResult);
+    } else {
+      rawQuestionBlocks = await parseDocumentQuestions(
+        job.temporaryFilePath,
+        job.fileType
+      );
+    }
 
     if (!rawQuestionBlocks || rawQuestionBlocks.length === 0) {
       job.status = "failed";
-      job.error = "No programming questions could be identified in the uploaded file.";
-      job.progressMessage = "Failed: No questions detected in document.";
+      job.error = isVivaMCQ
+        ? "No multiple choice questions could be identified in the uploaded file."
+        : "No programming questions could be identified in the uploaded file.";
+      job.progressMessage = isVivaMCQ
+        ? "Failed: No MCQs detected in document."
+        : "Failed: No questions detected in document.";
       await job.save();
       return;
     }
@@ -73,10 +89,26 @@ export const runQuestionExtractionJob = async (jobId) => {
       await job.save();
 
       try {
-        const batchResults = await extractQuestionBatchWithGemini(
-          currentBatch,
-          batchNum
-        );
+        let batchResults;
+        if (isVivaMCQ) {
+          // Fast-Path: Check if current batch was already cleanly parsed with options & question text
+          const allHaveOptions = currentBatch.every(
+            (q) => Array.isArray(q.options) && q.options.length >= 2 && (q.questionText || q.problemStatement || "").trim().length >= 5
+          );
+
+          if (allHaveOptions) {
+            // Instant high-speed rule-based extraction
+            batchResults = currentBatch.map((q) => ({
+              ...q,
+              batchNumber: batchNum,
+            }));
+          } else {
+            // Ambiguous formatting: call Gemini AI to assist with option/answer structure
+            batchResults = await extractMCQBatchWithGemini(currentBatch, batchNum);
+          }
+        } else {
+          batchResults = await extractQuestionBatchWithGemini(currentBatch, batchNum);
+        }
 
         for (const q of batchResults) {
           allExtractedQuestions.push(q);
@@ -100,7 +132,11 @@ export const runQuestionExtractionJob = async (jobId) => {
           allExtractedQuestions.push({
             originalQuestionNumber: raw.originalQuestionNumber || `Q${raw.orderIndex}`,
             title: raw.title || `Question ${raw.orderIndex}`,
-            problemStatement: raw.rawContent || raw.problemStatement || "",
+            problemStatement: raw.rawContent || raw.problemStatement || raw.questionText || "",
+            questionText: raw.questionText || raw.rawContent || "",
+            questionType: isVivaMCQ ? "mcq" : "coding",
+            options: raw.options || [],
+            correctAnswer: raw.correctAnswer || "Answer Not Provided",
             contentType: raw.contentType || "text",
             matrixData: raw.matrixData || null,
             sourcePageNumber: raw.sourcePageNumber || 1,
@@ -108,15 +144,15 @@ export const runQuestionExtractionJob = async (jobId) => {
             outputFormat: raw.outputFormat || "",
             constraints: raw.constraints || "",
             difficulty: raw.difficulty || "Medium",
-            marks: raw.marks || 100,
+            marks: raw.marks || 1,
             sampleTestCases: raw.sampleTestCases || [],
-            hiddenTestCases: [],
+            hiddenTestCases: raw.hiddenTestCases || [],
             hasPatternOrMatrix: raw.hasPatternOrMatrix || false,
             status: "needs_review",
             reviewReason: `Batch extraction encountered error: ${batchErr.message}. Preserved raw content.`,
             orderIndex: raw.orderIndex,
             batchNumber: batchNum,
-            rawExcerpt: (raw.rawContent || "").slice(0, 200),
+            rawExcerpt: (raw.rawContent || raw.questionText || "").slice(0, 200),
           });
           needsReviewCount++;
         }
@@ -129,8 +165,8 @@ export const runQuestionExtractionJob = async (jobId) => {
       job.extractedQuestions = allExtractedQuestions;
       await job.save();
 
-      // Brief gentle throttle between batches to maintain healthy API rate limits
-      if (bIdx < batches.length - 1) {
+      // Brief gentle throttle between batches if invoking external AI APIs
+      if (!isVivaMCQ && bIdx < batches.length - 1) {
         await new Promise((r) => setTimeout(r, 600));
       }
     }

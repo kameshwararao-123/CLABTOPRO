@@ -33,8 +33,10 @@ const ExamQuestionUploadModal = ({
   onClose,
   examId,
   examTitle,
+  examType = "internal",
   onExtractionComplete,
 }) => {
+  const isViva = examType === "viva";
   const [file, setFile] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -115,19 +117,19 @@ const ExamQuestionUploadModal = ({
       const jobId = res.jobId;
       setActiveJobId(jobId);
 
-      // Start live polling for extraction progress
-      pollIntervalRef.current = setInterval(async () => {
+      // Fast responsive polling for extraction progress
+      const checkStatus = async () => {
         try {
           const statusRes = await getExtractionJobStatus(examId, jobId);
           const currentJob = statusRes.job;
           setJobStatus(currentJob);
 
           if (currentJob.status === "completed") {
-            clearInterval(pollIntervalRef.current);
+            if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
             pollIntervalRef.current = null;
             setUploading(false);
           } else if (currentJob.status === "failed") {
-            clearInterval(pollIntervalRef.current);
+            if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
             pollIntervalRef.current = null;
             setUploading(false);
             setErrorMsg(currentJob.error || "Question extraction encountered a failure.");
@@ -135,7 +137,11 @@ const ExamQuestionUploadModal = ({
         } catch (pollErr) {
           console.error("Polling error:", pollErr);
         }
-      }, 1200);
+      };
+
+      // Poll immediately after 200ms, then every 800ms
+      setTimeout(checkStatus, 200);
+      pollIntervalRef.current = setInterval(checkStatus, 800);
     } catch (err) {
       setUploading(false);
       setErrorMsg(
@@ -172,10 +178,12 @@ const ExamQuestionUploadModal = ({
         <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4 bg-slate-50/50">
           <div>
             <h3 className="text-lg font-bold text-slate-800">
-              Bulk Upload Examination Questions
+              {isViva ? "Bulk Upload Viva MCQ Questions" : "Bulk Upload Examination Questions"}
             </h3>
             <p className="text-xs text-slate-500">
-              Upload up to 200 questions via PDF or Excel document for AI-powered extraction.
+              {isViva
+                ? "Upload Viva Multiple Choice Questions (MCQs) via PDF or Excel document for rapid automated extraction."
+                : "Upload up to 200 questions via PDF or Excel document for AI-powered extraction."}
             </p>
           </div>
           {!uploading && (
@@ -288,28 +296,30 @@ const ExamQuestionUploadModal = ({
                     <div>
                       <div className="flex items-center gap-2">
                         <h4 className="text-xs sm:text-sm font-bold text-slate-800">
-                          PDF Upload Guidelines
+                          {isViva ? "Viva MCQ PDF Upload Guidelines" : "PDF Upload Guidelines"}
                         </h4>
                         <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-bold text-indigo-700">
-                          Format Guide
+                          {isViva ? "MCQ Format Guide" : "Format Guide"}
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-500">
-                        Follow the recommended question document structure for accurate automated extraction.
+                        {isViva
+                          ? "Follow the recommended Viva MCQ format for rapid automated extraction."
+                          : "Follow the recommended question document structure for accurate automated extraction."}
                       </p>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-2">
                     <a
-                      href="/sample_question_paper_template.pdf"
-                      download="Sample_Question_Paper_Template.pdf"
+                      href={isViva ? "/sample_viva_mcq_template.pdf" : "/sample_question_paper_template.pdf"}
+                      download={isViva ? "Sample_Viva_MCQ_Template.pdf" : "Sample_Question_Paper_Template.pdf"}
                       onClick={(e) => e.stopPropagation()}
                       className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-indigo-600 shadow-2xs hover:bg-slate-50 hover:border-indigo-300 transition"
-                      title="Download reference question paper PDF"
+                      title={isViva ? "Download reference Viva MCQ PDF template" : "Download reference question paper PDF"}
                     >
                       <Download size={13} />
-                      <span>Sample PDF Template</span>
+                      <span>{isViva ? "Sample Viva MCQ Template" : "Sample PDF Template"}</span>
                     </a>
 
                     <button
@@ -326,95 +336,182 @@ const ExamQuestionUploadModal = ({
                 {/* Collapsible Guidelines Body */}
                 {showGuidelines && (
                   <div className="p-4 space-y-3.5 text-xs text-slate-700">
-                    <ol className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px] leading-relaxed">
-                      <li className="flex items-start gap-2">
-                        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
-                          1
-                        </span>
-                        <span>
-                          Upload <strong>text-based PDFs</strong> generated using MS Word, Google Docs or LaTeX.
-                        </span>
-                      </li>
+                    {isViva ? (
+                      <ol className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px] leading-relaxed">
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            1
+                          </span>
+                          <span>
+                            Upload <strong>text-based PDFs</strong> generated using MS Word, Google Docs or LaTeX.
+                          </span>
+                        </li>
 
-                      <li className="flex items-start gap-2">
-                        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
-                          2
-                        </span>
-                        <span>
-                          Use <strong>sequential question numbering</strong> such as Q1, Q2, Q3.
-                        </span>
-                      </li>
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            2
+                          </span>
+                          <span>
+                            Use <strong>sequential question numbering</strong> such as Q1, Q2, Q3 (or 1., 2., 3.).
+                          </span>
+                        </li>
 
-                      <li className="flex items-start gap-2">
-                        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
-                          3
-                        </span>
-                        <span>
-                          Keep <strong>question titles and problem descriptions</strong> clearly separated.
-                        </span>
-                      </li>
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            3
+                          </span>
+                          <span>
+                            Clearly separate <strong>question text and code snippets</strong> from the option choices.
+                          </span>
+                        </li>
 
-                      <li className="flex items-start gap-2">
-                        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
-                          4
-                        </span>
-                        <span>
-                          Use separate <strong>Sample Input</strong> and <strong>Sample Output</strong> headings.
-                        </span>
-                      </li>
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            4
+                          </span>
+                          <span>
+                            Format options with clear labels: <strong>A.</strong>, <strong>B.</strong>, <strong>C.</strong>, <strong>D.</strong> (or <strong>(A)</strong>, <strong>(B)</strong>).
+                          </span>
+                        </li>
 
-                      <li className="flex items-start gap-2">
-                        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
-                          5
-                        </span>
-                        <span>
-                          Place sample input/output in separate <strong>preformatted blocks</strong>.
-                        </span>
-                      </li>
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            5
+                          </span>
+                          <span>
+                            Include an explicit <strong>Answer line</strong>: <code>Answer: B</code> or <code>Ans: C</code> after options.
+                          </span>
+                        </li>
 
-                      <li className="flex items-start gap-2">
-                        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
-                          6
-                        </span>
-                        <span>
-                          Preserve <strong>line breaks and indentation</strong> in star, pyramid, diamond, number and alphabet patterns.
-                        </span>
-                      </li>
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            6
+                          </span>
+                          <span>
+                            Optionally provide an <strong>Explanation line</strong>: <code>Explanation: ...</code> for student post-exam review.
+                          </span>
+                        </li>
 
-                      <li className="flex items-start gap-2">
-                        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
-                          7
-                        </span>
-                        <span>
-                          Arrange <strong>matrices in proper rows and columns</strong>.
-                        </span>
-                      </li>
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            7
+                          </span>
+                          <span>
+                            Preserve <strong>code indentation and line breaks</strong> in C syntax or output-prediction snippets.
+                          </span>
+                        </li>
 
-                      <li className="flex items-start gap-2">
-                        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
-                          8
-                        </span>
-                        <span>
-                          Keep each <strong>question and its sample test cases</strong> together.
-                        </span>
-                      </li>
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            8
+                          </span>
+                          <span>
+                            Provide at least <strong>2 to 4 distinct options</strong> per multiple-choice question.
+                          </span>
+                        </li>
 
-                      <li className="flex items-start gap-2 sm:col-span-2">
-                        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-700 text-[10px] font-bold mt-0.5">
-                          9
-                        </span>
-                        <span>
-                          Avoid <strong>scanned PDFs, photographs, blurry text</strong> and complex multi-column layouts.
-                        </span>
-                      </li>
-                    </ol>
+                        <li className="flex items-start gap-2 sm:col-span-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-700 text-[10px] font-bold mt-0.5">
+                            9
+                          </span>
+                          <span>
+                            Avoid <strong>scanned PDFs, photographs, blurry text</strong> and complex multi-column layouts.
+                          </span>
+                        </li>
+                      </ol>
+                    ) : (
+                      <ol className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px] leading-relaxed">
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            1
+                          </span>
+                          <span>
+                            Upload <strong>text-based PDFs</strong> generated using MS Word, Google Docs or LaTeX.
+                          </span>
+                        </li>
+
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            2
+                          </span>
+                          <span>
+                            Use <strong>sequential question numbering</strong> such as Q1, Q2, Q3.
+                          </span>
+                        </li>
+
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            3
+                          </span>
+                          <span>
+                            Keep <strong>question titles and problem descriptions</strong> clearly separated.
+                          </span>
+                        </li>
+
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            4
+                          </span>
+                          <span>
+                            Use separate <strong>Sample Input</strong> and <strong>Sample Output</strong> headings.
+                          </span>
+                        </li>
+
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            5
+                          </span>
+                          <span>
+                            Place sample input/output in separate <strong>preformatted blocks</strong>.
+                          </span>
+                        </li>
+
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            6
+                          </span>
+                          <span>
+                            Preserve <strong>line breaks and indentation</strong> in star, pyramid, diamond, number and alphabet patterns.
+                          </span>
+                        </li>
+
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            7
+                          </span>
+                          <span>
+                            Arrange <strong>matrices in proper rows and columns</strong>.
+                          </span>
+                        </li>
+
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
+                            8
+                          </span>
+                          <span>
+                            Keep each <strong>question and its test cases</strong> together (support for both <strong>Sample Test Cases</strong> and <strong>Hidden Test Cases</strong>).
+                          </span>
+                        </li>
+
+                        <li className="flex items-start gap-2 sm:col-span-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-700 text-[10px] font-bold mt-0.5">
+                            9
+                          </span>
+                          <span>
+                            Avoid <strong>scanned PDFs, photographs, blurry text</strong> and complex multi-column layouts.
+                          </span>
+                        </li>
+                      </ol>
+                    )}
 
                     {/* Important Notice */}
                     <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-900 leading-relaxed shadow-2xs">
                       <AlertTriangle size={15} className="text-amber-600 flex-shrink-0 mt-0.5" />
                       <div>
                         <strong className="font-bold text-amber-800">Important Notice: </strong>
-                        For accurate extraction, please follow the recommended PDF question format. Questions that cannot be extracted confidently will be sent for faculty review.
+                        {isViva
+                          ? "Viva examinations are strictly MCQ-based. Provide sequential numbering (Q1..Qn), clearly labeled options (A-D), and explicit Answer keys (e.g., Answer: B) for instant, automated extraction. Questions without explicit answers will be flagged for faculty review."
+                          : "For accurate extraction, please follow the recommended PDF question format. Questions that cannot be extracted confidently will be sent for faculty review."}
                       </div>
                     </div>
                   </div>

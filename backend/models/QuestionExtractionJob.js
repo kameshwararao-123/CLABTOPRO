@@ -6,11 +6,39 @@ const extractedTestCaseSchema = new mongoose.Schema(
     expectedOutput: { type: String, default: "" },
     explanation: { type: String, default: "" },
     isHidden: { type: Boolean, default: false },
+    type: {
+      type: String,
+      enum: ["sample", "hidden"],
+      default: function () {
+        return this.isHidden ? "hidden" : "sample";
+      },
+    },
   },
   { _id: false }
 );
 
 const extractedQuestionSchema = new mongoose.Schema({
+  questionType: {
+    type: String,
+    enum: ["coding", "mcq"],
+    default: "coding",
+  },
+  questionText: {
+    type: String,
+    default: "",
+  },
+  options: [
+    {
+      optionId: { type: String, default: "" },
+      text: { type: String, default: "" },
+      _id: false,
+    },
+  ],
+  correctAnswer: {
+    type: String,
+    default: "",
+    trim: true,
+  },
   originalQuestionNumber: {
     type: String,
     default: "",
@@ -133,6 +161,12 @@ const questionExtractionJobSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
+    },
+    jobType: {
+      type: String,
+      enum: ["coding", "viva_mcq"],
+      default: "coding",
+      index: true,
     },
     fileName: {
       type: String,

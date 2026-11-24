@@ -213,18 +213,36 @@ export const detectPatternOrMatrix = (text = "") => {
 /**
  * Parses sample test cases with strict boundary detection from a raw question block.
  * Identifies:
- *  - Sample Input / Sample Output boundaries
- *  - Multiple sample cases (Sample #1, Sample #2, etc.)
+ *  - Sample and Hidden Test Case boundaries
+ *  - Multiple sample cases and hidden test cases
+ *  - Formats: "Sample Test Cases", "Sample Test Case 1", "Sample Input / Output"
+ *            "Hidden Test Cases", "Hidden Test Case 1", "Private Test Cases", "Hidden Input / Output"
+ *            "Test Case 1", "Test Case 2", etc.
  *  - Explanation / Note / Constraints boundary stops
  *  - Header/footer exclusion
  */
-export const parseBlockSampleTestCases = (rawContent = "", title = "") => {
-  if (!rawContent) return [];
+export const parseBlockAllTestCases = (rawContent = "", title = "") => {
+  if (!rawContent) return { sampleTestCases: [], hiddenTestCases: [] };
   const lines = rawContent.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 
-  const testCases = [];
+  const sampleCases = [];
+  const hiddenCases = [];
+  let currentSection = "sample"; // default section
   let currentCase = null;
   let activeField = null; // "input" | "output" | "explanation"
+
+  const commitCurrentCase = () => {
+    if (!currentCase) return;
+    if (currentCase.outputLines.length > 0 || currentCase.inputLines.length > 0) {
+      if (currentCase.category === "hidden") {
+        hiddenCases.push(currentCase);
+      } else {
+        sampleCases.push(currentCase);
+      }
+    }
+    currentCase = null;
+    activeField = null;
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -244,13 +262,23 @@ export const parseBlockSampleTestCases = (rawContent = "", title = "") => {
       continue;
     }
 
-    // Check for new section boundary that terminates sample input/output
+    // Check for new general section boundary that terminates test cases
     if (/^(?:input\s*format|output\s*format|constraints?|notes?|complexity)[:\-]?/i.test(trimmed)) {
-      if (currentCase) {
-        testCases.push(currentCase);
-        currentCase = null;
-      }
-      activeField = null;
+      commitCurrentCase();
+      continue;
+    }
+
+    // Check for Section Header: "Hidden Test Cases" or "Private Test Cases"
+    if (/^[ \t]*(?:hidden|private)\s+test(?:\s*cases?)?[:\-]?$/i.test(trimmed)) {
+      commitCurrentCase();
+      currentSection = "hidden";
+      continue;
+    }
+
+    // Check for Section Header: "Sample Test Cases" or "Public Test Cases"
+    if (/^[ \t]*(?:sample|example|public)\s+test(?:\s*cases?)?[:\-]?$/i.test(trimmed)) {
+      commitCurrentCase();
+      currentSection = "sample";
       continue;
     }
 
@@ -264,26 +292,71 @@ export const parseBlockSampleTestCases = (rawContent = "", title = "") => {
       continue;
     }
 
-    // Check for Sample Input header (e.g. "Sample Input", "Sample 1 Input", "Input:", "Sample #1")
-    const isInputHeader =
+    // Check for explicit standalone Test Case header
+    // e.g. "Hidden Test Case 1:", "Hidden Test Case #2", "Private Test Case 1"
+    const isHiddenCaseHeader =
+      /^[ \t]*(?:hidden|private)\s+test(?:\s*case)?\s*(?:#?\d+)?[:\-]?$/i.test(trimmed) ||
+      /^[ \t]*test(?:\s*case)?\s*(?:#?\d+)?\s*\((?:hidden|private)\)[:\-]?$/i.test(trimmed);
+
+    // e.g. "Sample Test Case 1:", "Sample Test Case #2", "Example 1:"
+    const isSampleCaseHeader =
+      /^[ \t]*(?:sample|example)\s+test(?:\s*case)?\s*(?:#?\d+)?[:\-]?$/i.test(trimmed) ||
+      /^[ \t]*test(?:\s*case)?\s*(?:#?\d+)?\s*\((?:sample|public|example)\)[:\-]?$/i.test(trimmed) ||
+      /^[ \t]*example\s+#?\d+[:\-]?$/i.test(trimmed);
+
+    // e.g. "Test Case 1:", "Test Case #1:"
+    const isGenericCaseHeader =
+      /^[ \t]*test(?:\s*case)?\s*#?\d+[:\-]?$/i.test(trimmed) &&
+      !/(?:input|output)/i.test(trimmed);
+
+    if (isHiddenCaseHeader) {
+      commitCurrentCase();
+      currentCase = { category: "hidden", inputLines: [], outputLines: [], explanationLines: [] };
+      continue;
+    }
+
+    if (isSampleCaseHeader) {
+      commitCurrentCase();
+      currentCase = { category: "sample", inputLines: [], outputLines: [], explanationLines: [] };
+      continue;
+    }
+
+    if (isGenericCaseHeader) {
+      commitCurrentCase();
+      currentCase = { category: currentSection, inputLines: [], outputLines: [], explanationLines: [] };
+      continue;
+    }
+
+    // Check for Input headers
+    const isExplicitHiddenInput =
+      /^[ \t]*(?:hidden|private)(?:\s+test(?:\s*case)?)?\s*(?:#?\d+)?\s*input(?:\s*#?\d+)?[:\-]?/i.test(trimmed);
+
+    const isExplicitSampleInput =
+      /^[ \t]*(?:sample|example)(?:\s+test(?:\s*case)?)?\s*(?:#?\d+)?\s*input(?:\s*#?\d+)?[:\-]?/i.test(trimmed);
+
+    const isGenericInput =
       /^[ \t]*(?:(?:sample|example|test(?:\s*case)?)\s*(?:#?\d+)?\s*)?input(?:\s*#?\d+)?[:\-]?/i.test(trimmed);
 
-    // Check for Sample Output header (e.g. "Sample Output", "Sample 1 Output", "Output:")
-    const isOutputHeader =
-      /^[ \t]*(?:(?:sample|example|test(?:\s*case)?)\s*(?:#?\d+)?\s*)?output(?:\s*#?\d+)?[:\-]?/i.test(trimmed);
-
-    if (isInputHeader) {
-      // If we already have an ongoing test case that has outputs, commit it and start a new one!
+    if (isExplicitHiddenInput || isExplicitSampleInput || isGenericInput) {
       if (currentCase && currentCase.outputLines.length > 0) {
-        testCases.push(currentCase);
-        currentCase = null;
+        commitCurrentCase();
       }
+      const category = isExplicitHiddenInput
+        ? "hidden"
+        : isExplicitSampleInput
+        ? "sample"
+        : currentCase?.category || currentSection;
+
       if (!currentCase) {
-        currentCase = { inputLines: [], outputLines: [], explanationLines: [] };
+        currentCase = { category, inputLines: [], outputLines: [], explanationLines: [] };
+      } else {
+        currentCase.category = category;
       }
       activeField = "input";
+
+      // Strip the header part
       const val = line.replace(
-        /^[ \t]*(?:(?:sample|example|test(?:\s*case)?)\s*(?:#?\d+)?\s*)?input(?:\s*#?\d+)?[:\-]?[ \t]*/i,
+        /^[ \t]*(?:(?:hidden|private|sample|example|test(?:\s*case)?)\s*(?:#?\d+)?\s*)?input(?:\s*#?\d+)?[:\-]?[ \t]*/i,
         ""
       );
       if (val.trim()) {
@@ -292,13 +365,33 @@ export const parseBlockSampleTestCases = (rawContent = "", title = "") => {
       continue;
     }
 
-    if (isOutputHeader) {
+    // Check for Output headers
+    const isExplicitHiddenOutput =
+      /^[ \t]*(?:hidden|private)(?:\s+test(?:\s*case)?)?\s*(?:#?\d+)?\s*(?:output|expected)(?:\s*#?\d+)?[:\-]?/i.test(trimmed);
+
+    const isExplicitSampleOutput =
+      /^[ \t]*(?:sample|example)(?:\s+test(?:\s*case)?)?\s*(?:#?\d+)?\s*(?:output|expected)(?:\s*#?\d+)?[:\-]?/i.test(trimmed);
+
+    const isGenericOutput =
+      /^[ \t]*(?:(?:sample|example|test(?:\s*case)?)\s*(?:#?\d+)?\s*)?(?:expected\s+output|output)(?:\s*#?\d+)?[:\-]?/i.test(trimmed);
+
+    if (isExplicitHiddenOutput || isExplicitSampleOutput || isGenericOutput) {
+      const category = isExplicitHiddenOutput
+        ? "hidden"
+        : isExplicitSampleOutput
+        ? "sample"
+        : currentCase?.category || currentSection;
+
       if (!currentCase) {
-        currentCase = { inputLines: [], outputLines: [], explanationLines: [] };
+        currentCase = { category, inputLines: [], outputLines: [], explanationLines: [] };
+      } else {
+        currentCase.category = category;
       }
       activeField = "output";
+
+      // Strip the header part
       const val = line.replace(
-        /^[ \t]*(?:(?:sample|example|test(?:\s*case)?)\s*(?:#?\d+)?\s*)?output(?:\s*#?\d+)?[:\-]?[ \t]*/i,
+        /^[ \t]*(?:(?:hidden|private|sample|example|test(?:\s*case)?)\s*(?:#?\d+)?\s*)?(?:expected\s+output|output)(?:\s*#?\d+)?[:\-]?[ \t]*/i,
         ""
       );
       if (val.trim()) {
@@ -316,22 +409,35 @@ export const parseBlockSampleTestCases = (rawContent = "", title = "") => {
     }
   }
 
-  if (currentCase && (currentCase.outputLines.length > 0 || currentCase.inputLines.length > 0)) {
-    testCases.push(currentCase);
-  }
+  commitCurrentCase();
 
-  return testCases
-    .map((tc, idx) => {
-      const inputStr = normalizeSampleContent(tc.inputLines.join("\n"), "input");
-      const outputStr = normalizeSampleContent(tc.outputLines.join("\n"), "output");
-      return {
-        input: inputStr,
-        expectedOutput: outputStr,
-        explanation: tc.explanationLines.join("\n").trim() || `Sample Test Case #${idx + 1}`,
-        isHidden: false,
-      };
-    })
-    .filter((tc) => tc.expectedOutput || tc.input);
+  const formatCases = (list, isHidden) =>
+    list
+      .map((tc, idx) => {
+        const inputStr = normalizeSampleContent(tc.inputLines.join("\n"), "input");
+        const outputStr = normalizeSampleContent(tc.outputLines.join("\n"), "output");
+        const prefix = isHidden ? "Hidden" : "Sample";
+        return {
+          type: isHidden ? "hidden" : "sample",
+          input: inputStr,
+          expectedOutput: outputStr,
+          explanation: tc.explanationLines.join("\n").trim() || `${prefix} Test Case #${idx + 1}`,
+          isHidden,
+        };
+      })
+      .filter((tc) => tc.expectedOutput || tc.input);
+
+  return {
+    sampleTestCases: formatCases(sampleCases, false),
+    hiddenTestCases: formatCases(hiddenCases, true),
+  };
+};
+
+/**
+ * Backwards-compatible helper returning extracted sample test cases.
+ */
+export const parseBlockSampleTestCases = (rawContent = "", title = "") => {
+  return parseBlockAllTestCases(rawContent, title).sampleTestCases;
 };
 
 /**
@@ -595,7 +701,7 @@ export const splitRawTextIntoQuestionBlocks = (rawInput = "") => {
       .filter((p) => p.length > 25);
 
     return paragraphs.map((p, idx) => {
-      const sampleTestCases = parseBlockSampleTestCases(p, `Question ${idx + 1}`);
+      const { sampleTestCases, hiddenTestCases } = parseBlockAllTestCases(p, `Question ${idx + 1}`);
       const contentType = classifyQuestionContent({ problemStatement: p, rawContent: p, sampleTestCases });
       const matrixData =
         contentType === "matrix" && sampleTestCases.length > 0
@@ -612,6 +718,7 @@ export const splitRawTextIntoQuestionBlocks = (rawInput = "") => {
         matrixData,
         sourcePageNumber: 1,
         sampleTestCases,
+        hiddenTestCases,
         orderIndex: idx + 1,
       };
     });
@@ -637,7 +744,7 @@ export const splitRawTextIntoQuestionBlocks = (rawInput = "") => {
     cleanedText = stripResidualHeadersAndFooters(cleanedText).trim();
 
     const title = current.title || `Question ${current.qNum}`;
-    const sampleTestCases = parseBlockSampleTestCases(cleanedText, title);
+    const { sampleTestCases, hiddenTestCases } = parseBlockAllTestCases(cleanedText, title);
 
     const contentType = classifyQuestionContent({
       title,
@@ -661,6 +768,7 @@ export const splitRawTextIntoQuestionBlocks = (rawInput = "") => {
       matrixData,
       sourcePageNumber,
       sampleTestCases,
+      hiddenTestCases,
       orderIndex: i + 1,
     });
   }
@@ -722,7 +830,9 @@ export const extractQuestionsFromExcel = async (filePath) => {
           else if (/^(output|output\s*format)/i.test(cellVal)) colMap.outputFormat = colIdx;
           else if (/^(constraints?|limits?)/i.test(cellVal)) colMap.constraints = colIdx;
           else if (/^(sample\s*input|test\s*input)/i.test(cellVal)) colMap.sampleInput = colIdx;
-          else if (/^(sample\s*output|test\s*output|expected)/i.test(cellVal)) colMap.sampleOutput = colIdx;
+          else if (/^(sample\s*output|test\s*output|expected(?:\s*output)?)/i.test(cellVal)) colMap.sampleOutput = colIdx;
+          else if (/^(hidden\s*input|private\s*input)/i.test(cellVal)) colMap.hiddenInput = colIdx;
+          else if (/^(hidden\s*output|private\s*output)/i.test(cellVal)) colMap.hiddenOutput = colIdx;
           else if (/^(difficulty|level)/i.test(cellVal)) colMap.difficulty = colIdx;
           else if (/^(marks?|points?|score)/i.test(cellVal)) colMap.marks = colIdx;
         });
@@ -744,12 +854,16 @@ export const extractQuestionsFromExcel = async (filePath) => {
         const constraints = colMap.constraints !== undefined ? String(row[colMap.constraints] || "") : "";
         const rawSampleInput = colMap.sampleInput !== undefined ? String(row[colMap.sampleInput] || "") : "";
         const rawSampleOutput = colMap.sampleOutput !== undefined ? String(row[colMap.sampleOutput] || "") : "";
+        const rawHiddenInput = colMap.hiddenInput !== undefined ? String(row[colMap.hiddenInput] || "") : "";
+        const rawHiddenOutput = colMap.hiddenOutput !== undefined ? String(row[colMap.hiddenOutput] || "") : "";
         const difficulty = colMap.difficulty !== undefined ? String(row[colMap.difficulty] || "Medium") : "Medium";
         const marks = colMap.marks !== undefined ? Number(row[colMap.marks]) || 100 : 100;
 
         // Clean & normalize sample input/output while preserving exact multiline formatting and whitespace
         const cleanedInput = normalizeSampleContent(rawSampleInput, "input");
         const cleanedOutput = normalizeSampleContent(rawSampleOutput, "output");
+        const cleanedHiddenInput = normalizeSampleContent(rawHiddenInput, "input");
+        const cleanedHiddenOutput = normalizeSampleContent(rawHiddenOutput, "output");
         const cleanedStatement = cleanProblemStatement(statement || title);
 
         const fullText = [
@@ -758,6 +872,8 @@ export const extractQuestionsFromExcel = async (filePath) => {
           outputFormat ? `Output Format:\n${outputFormat}` : "",
           cleanedInput ? `Sample Input:\n${cleanedInput}` : "",
           cleanedOutput ? `Sample Output:\n${cleanedOutput}` : "",
+          cleanedHiddenInput ? `Hidden Input:\n${cleanedHiddenInput}` : "",
+          cleanedHiddenOutput ? `Hidden Output:\n${cleanedHiddenOutput}` : "",
         ]
           .filter(Boolean)
           .join("\n\n");
@@ -779,6 +895,18 @@ export const extractQuestionsFromExcel = async (filePath) => {
             ? parseStructuredMatrix(cleanedOutput) || parseStructuredMatrix(cleanedInput)
             : null;
 
+        const hiddenTestCases = cleanedHiddenOutput
+          ? [
+              {
+                type: "hidden",
+                input: cleanedHiddenInput,
+                expectedOutput: cleanedHiddenOutput,
+                explanation: "Hidden test from Excel sheet",
+                isHidden: true,
+              },
+            ]
+          : [];
+
         extractedBlocks.push({
           originalQuestionNumber: originalQuestionNumber.startsWith("Q")
             ? originalQuestionNumber
@@ -798,6 +926,7 @@ export const extractQuestionsFromExcel = async (filePath) => {
             cleanedOutput
               ? [
                   {
+                    type: "sample",
                     input: cleanedInput,
                     expectedOutput: cleanedOutput,
                     explanation: "Sample from Excel sheet",
@@ -805,6 +934,7 @@ export const extractQuestionsFromExcel = async (filePath) => {
                   },
                 ]
               : [],
+          hiddenTestCases,
           rawContent: fullText,
           orderIndex: globalOrderIndex++,
           isStructured: true,

@@ -3,6 +3,12 @@ import { Link, useNavigate } from "react-router-dom";
 import Input from "../../components/common/Input";
 import Button from "../../components/common/Button";
 import { registerUser } from "../../services/authService";
+import {
+  isValidCollegeEmail,
+  normalizeCollegeEmail,
+  REGISTRATION_RESTRICTION_MESSAGE,
+  COLLEGE_EMAIL_HELPER_NOTE,
+} from "../../utils/collegeEmailValidator";
 
 const Register = () => {
   const navigate = useNavigate();
@@ -36,6 +42,12 @@ const Register = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
 
+    const normalizedEmail = normalizeCollegeEmail(form.email);
+    if (!isValidCollegeEmail(normalizedEmail)) {
+      setError(REGISTRATION_RESTRICTION_MESSAGE);
+      return;
+    }
+
     if (form.password.length < 6) {
       setPasswordError("Password must be at least 6 characters long");
       return;
@@ -45,7 +57,10 @@ const Register = () => {
       setLoading(true);
       setError("");
 
-      await registerUser(form);
+      await registerUser({
+        ...form,
+        email: normalizedEmail,
+      });
 
       navigate("/login");
     } catch (error) {
@@ -101,15 +116,20 @@ const Register = () => {
             required
           />
 
-          <Input
-            label="Email"
-            type="email"
-            name="email"
-            value={form.email}
-            onChange={handleChange}
-            placeholder="Enter email"
-            required
-          />
+          <div>
+            <Input
+              label="Email"
+              type="email"
+              name="email"
+              value={form.email}
+              onChange={handleChange}
+              placeholder="e.g. s210670@rguktsklm.ac.in"
+              required
+            />
+            <p className="mt-1.5 text-xs text-slate-500">
+              {COLLEGE_EMAIL_HELPER_NOTE}
+            </p>
+          </div>
 
           <div>
             <Input

@@ -22,6 +22,7 @@ import {
   classifyQuestionContent,
   parseStructuredMatrix,
   parseBlockSampleTestCases,
+  parseBlockAllTestCases,
 } from "./questionParserService.js";
 
 /**
@@ -117,18 +118,22 @@ export const validateQuestionConfidence = (q) => {
   }
 
   const sampleCases = Array.isArray(q.sampleTestCases) ? q.sampleTestCases : [];
-  const firstOutput = sampleCases[0]?.expectedOutput || "";
-  const firstInput = sampleCases[0]?.input || "";
+  const hiddenCases = Array.isArray(q.hiddenTestCases) ? q.hiddenTestCases : [];
+  const allCases = [...sampleCases, ...hiddenCases];
 
   // 2. Suspected header/footer contamination in output or statement
   const headerFooterRegex =
     /(?:ClabToPro\s*[-–—|•].*|Page\s*\d+\s*(?:of|\/)\s*\d+|--\s*\d+\s+of\s+\d+\s*--|\bPage\s+\d+\b)/i;
-  if (headerFooterRegex.test(firstOutput) || headerFooterRegex.test(firstInput)) {
-    return {
-      status: "needs_review",
-      reviewReason: "Sample test case contains suspected page footer or header text",
-    };
+
+  for (const tc of allCases) {
+    if (headerFooterRegex.test(tc.expectedOutput || "") || headerFooterRegex.test(tc.input || "")) {
+      return {
+        status: "needs_review",
+        reviewReason: `${tc.isHidden ? "Hidden" : "Sample"} test case contains suspected page footer or header text`,
+      };
+    }
   }
+
   if (headerFooterRegex.test(statement)) {
     return {
       status: "needs_review",
@@ -138,14 +143,27 @@ export const validateQuestionConfidence = (q) => {
 
   // 3. Output has accidentally absorbed next question
   const nextQuestionRegex = /(?:^|\n)\s*(?:Question|Problem|Task)\s*\d+[:.\-]?/i;
-  if (nextQuestionRegex.test(firstOutput)) {
-    return {
-      status: "needs_review",
-      reviewReason: "Sample output appears to have absorbed content from a subsequent question",
-    };
+  for (const tc of allCases) {
+    if (nextQuestionRegex.test(tc.expectedOutput || "")) {
+      return {
+        status: "needs_review",
+        reviewReason: `${tc.isHidden ? "Hidden" : "Sample"} test output appears to have absorbed content from a subsequent question`,
+      };
+    }
   }
 
-  // 4. Content-type specific validation
+  // 4. Incomplete test cases detection
+  for (const tc of allCases) {
+    if (tc.input && !tc.expectedOutput) {
+      return {
+        status: "needs_review",
+        reviewReason: `Incomplete ${tc.isHidden ? "hidden" : "sample"} test case detected — missing expected output`,
+      };
+    }
+  }
+
+  // 5. Content-type specific validation
+  const firstOutput = sampleCases[0]?.expectedOutput || hiddenCases[0]?.expectedOutput || "";
   if (q.contentType === "pattern") {
     if (!firstOutput) {
       return {
@@ -198,17 +216,21 @@ CRITICAL INSTRUCTIONS & PRESERVATION RULES:
      STRICTLY PRESERVE all line breaks (\\n), leading spaces, indentation, and alignment!
      NEVER flatten multiline outputs or matrices into a single line.
    - For matrices, include structured matrixData: { "type": "matrix", "rows": R, "columns": C, "values": [[...], [...]] }.
-4. SAMPLE TEST CASES & LABELS:
-   - Extract sample test cases that are explicitly provided in the text.
-   - Strictly stop sample output when constraints, explanations, page headers/footers, or next sections begin.
+4. ALL TEST CASES (SAMPLE & HIDDEN TEST CASES):
+   - Extract ALL test cases provided in the document:
+     a) "sampleTestCases": Visible test cases labeled "Sample Test Cases", "Sample Test Case 1", "Sample Input / Output", "Example 1", "Test Case 1 (Sample)", etc.
+     b) "hiddenTestCases": Hidden or private test cases labeled "Hidden Test Cases", "Hidden Test Case 1", "Private Test Cases", "Hidden Input / Output", "Test Case X (Hidden)", etc.
+   - Support multiple sample test cases and multiple hidden test cases per question.
+   - NEVER confuse sample test cases with hidden test cases. If test cases are under a "Hidden Test Cases" or "Private Test Cases" header, classify them into "hiddenTestCases".
+   - Strictly stop outputs when constraints, explanations, page headers/footers, or next sections begin.
    - DO NOT include page footers (e.g. "ClabToPro ... Page 7") in outputs or descriptions.
    - DO NOT prefix values with "Input:" or "Output:".
    - Decode any HTML entities like &#x20;, &nbsp; into normal spaces.
 5. ZERO HALLUCINATION POLICY:
-   - Do NOT invent or generate missing questions or fake test cases.
+   - Do NOT invent or generate missing questions or fake test cases. If a question has no hidden test cases in the document, return "hiddenTestCases": [].
 6. STATUS & VALIDATION:
    - "approved": Question structure, description, and required content are successfully validated.
-   - "needs_review": Only if there is genuine ambiguity, truncation, or suspected footer contamination.
+   - "needs_review": Only if there is genuine ambiguity, truncation, missing output for an input, or suspected footer contamination.
    - "incomplete_extraction": If description is missing or cut off.
 
 Return ONLY a valid JSON object matching this schema:
@@ -226,6 +248,13 @@ Return ONLY a valid JSON object matching this schema:
       "difficulty": "Easy" | "Medium" | "Hard",
       "marks": 100,
       "sampleTestCases": [
+        {
+          "input": "...",
+          "expectedOutput": "...",
+          "explanation": "..."
+        }
+      ],
+      "hiddenTestCases": [
         {
           "input": "...",
           "expectedOutput": "...",
@@ -323,11 +352,17 @@ export const ruleBasedFallbackStructuring = (rawBlock) => {
     }
   }
 
-  // Parse sample test cases using strict boundary parser
-  const parsedCases =
-    rawBlock.sampleTestCases?.length > 0
-      ? rawBlock.sampleTestCases
-      : parseBlockSampleTestCases(text, title);
+  // Parse sample & hidden test cases using strict boundary parser
+  const allParsedCases =
+    rawBlock.sampleTestCases?.length > 0 || rawBlock.hiddenTestCases?.length > 0
+      ? {
+          sampleTestCases: rawBlock.sampleTestCases || [],
+          hiddenTestCases: rawBlock.hiddenTestCases || [],
+        }
+      : parseBlockAllTestCases(text, title);
+
+  const parsedSampleCases = allParsedCases.sampleTestCases || [];
+  const parsedHiddenCases = allParsedCases.hiddenTestCases || [];
 
   // Determine content type accurately
   const draftContentType =
@@ -335,21 +370,36 @@ export const ruleBasedFallbackStructuring = (rawBlock) => {
     classifyQuestionContent({
       title,
       problemStatement,
-      sampleTestCases: parsedCases,
+      sampleTestCases: parsedSampleCases,
       rawContent: text,
     });
 
   // Align pattern visuals for centered pyramids, hollow squares, and diamonds
-  const sampleTestCases = parsedCases.map((tc) => {
+  const sampleTestCases = parsedSampleCases.map((tc) => {
     let out = normalizeSampleContent(tc.expectedOutput, "output");
     if (draftContentType === "pattern") {
       out = alignPatternVisuals(out, title, problemStatement);
     }
     return {
+      type: "sample",
       input: normalizeSampleContent(tc.input, "input"),
       expectedOutput: out,
       explanation: tc.explanation || "Sample Test Case",
       isHidden: false,
+    };
+  });
+
+  const hiddenTestCases = parsedHiddenCases.map((tc) => {
+    let out = normalizeSampleContent(tc.expectedOutput, "output");
+    if (draftContentType === "pattern") {
+      out = alignPatternVisuals(out, title, problemStatement);
+    }
+    return {
+      type: "hidden",
+      input: normalizeSampleContent(tc.input, "input"),
+      expectedOutput: out,
+      explanation: tc.explanation || "Hidden Test Case",
+      isHidden: true,
     };
   });
 
@@ -377,7 +427,7 @@ export const ruleBasedFallbackStructuring = (rawBlock) => {
     difficulty: rawBlock.difficulty || "Medium",
     marks: rawBlock.marks || 100,
     sampleTestCases,
-    hiddenTestCases: [],
+    hiddenTestCases,
     orderIndex: rawBlock.orderIndex || 1,
     rawExcerpt: text.slice(0, 300),
   };
@@ -489,18 +539,32 @@ Extract each question verbatim while preserving all matrix and pattern alignment
               let finalSampleTestCases =
                 Array.isArray(extracted.sampleTestCases) && extracted.sampleTestCases.length > 0
                   ? extracted.sampleTestCases.map((tc) => ({
+                      type: "sample",
                       input: normalizeSampleContent(tc.input || "", "input"),
                       expectedOutput: normalizeSampleContent(tc.expectedOutput || "", "output"),
                       explanation: tc.explanation || "",
                       isHidden: false,
                     }))
                   : Array.isArray(original.sampleTestCases)
-                  ? original.sampleTestCases.map((tc) => ({ ...tc }))
+                  ? original.sampleTestCases.map((tc) => ({ ...tc, type: "sample", isHidden: false }))
+                  : [];
+
+              let finalHiddenTestCases =
+                Array.isArray(extracted.hiddenTestCases) && extracted.hiddenTestCases.length > 0
+                  ? extracted.hiddenTestCases.map((tc) => ({
+                      type: "hidden",
+                      input: normalizeSampleContent(tc.input || "", "input"),
+                      expectedOutput: normalizeSampleContent(tc.expectedOutput || "", "output"),
+                      explanation: tc.explanation || "",
+                      isHidden: true,
+                    }))
+                  : Array.isArray(original.hiddenTestCases)
+                  ? original.hiddenTestCases.map((tc) => ({ ...tc, type: "hidden", isHidden: true }))
                   : [];
 
               // Multiline preservation safeguard:
               // If Gemini flattened a multiline output into a single line (no \n),
-              // but the original block had multiline sample output, recover it!
+              // but the original block had multiline sample or hidden output, recover it!
               if (
                 original.sampleTestCases?.[0]?.expectedOutput?.includes("\n") &&
                 finalSampleTestCases.length > 0 &&
@@ -509,8 +573,22 @@ Extract each question verbatim while preserving all matrix and pattern alignment
                 finalSampleTestCases[0].expectedOutput = original.sampleTestCases[0].expectedOutput;
               }
 
+              if (
+                original.hiddenTestCases?.[0]?.expectedOutput?.includes("\n") &&
+                finalHiddenTestCases.length > 0 &&
+                !finalHiddenTestCases[0].expectedOutput.includes("\n")
+              ) {
+                finalHiddenTestCases[0].expectedOutput = original.hiddenTestCases[0].expectedOutput;
+              }
+
               // Strip any lingering header/footer contamination from test cases
               finalSampleTestCases = finalSampleTestCases.map((tc) => ({
+                ...tc,
+                expectedOutput: stripResidualHeadersAndFooters(tc.expectedOutput).trimEnd(),
+                input: stripResidualHeadersAndFooters(tc.input).trimEnd(),
+              }));
+
+              finalHiddenTestCases = finalHiddenTestCases.map((tc) => ({
                 ...tc,
                 expectedOutput: stripResidualHeadersAndFooters(tc.expectedOutput).trimEnd(),
                 input: stripResidualHeadersAndFooters(tc.input).trimEnd(),
@@ -527,12 +605,21 @@ Extract each question verbatim while preserving all matrix and pattern alignment
                 });
 
               // Align pattern visual spaces
-              if (contentType === "pattern" && finalSampleTestCases.length > 0) {
-                finalSampleTestCases[0].expectedOutput = alignPatternVisuals(
-                  finalSampleTestCases[0].expectedOutput,
-                  title,
-                  problemStatement
-                );
+              if (contentType === "pattern") {
+                if (finalSampleTestCases.length > 0) {
+                  finalSampleTestCases[0].expectedOutput = alignPatternVisuals(
+                    finalSampleTestCases[0].expectedOutput,
+                    title,
+                    problemStatement
+                  );
+                }
+                if (finalHiddenTestCases.length > 0) {
+                  finalHiddenTestCases[0].expectedOutput = alignPatternVisuals(
+                    finalHiddenTestCases[0].expectedOutput,
+                    title,
+                    problemStatement
+                  );
+                }
               }
 
               // Extract structured matrix if matrix problem
@@ -562,7 +649,7 @@ Extract each question verbatim while preserving all matrix and pattern alignment
                   : original.difficulty || "Medium",
                 marks: Number(extracted.marks) || original.marks || 100,
                 sampleTestCases: finalSampleTestCases,
-                hiddenTestCases: [],
+                hiddenTestCases: finalHiddenTestCases,
                 orderIndex: original.orderIndex || idx + 1,
                 batchNumber,
                 rawExcerpt: (original.rawContent || "").slice(0, 200),

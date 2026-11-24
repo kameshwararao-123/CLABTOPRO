@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import Editor from "@monaco-editor/react";
 import {
   Code2,
@@ -33,6 +33,7 @@ int main() {
 
 const ExamCodeEditorPage = () => {
   const { examId } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
 
   const [loading, setLoading] = useState(true);
@@ -47,29 +48,42 @@ const ExamCodeEditorPage = () => {
   const [timeLeftStr, setTimeLeftStr] = useState("");
 
   const editorRef = useRef(null);
+  const currentQId = searchParams.get("questionId");
+
+  const fetchExamInfo = async (qId) => {
+    try {
+      setLoading(true);
+      setErrorMsg("");
+      const params = qId ? { questionId: qId } : currentQId ? { questionId: currentQId } : {};
+      const res = await getMyAssignedQuestion(examId, params);
+      setData(res);
+
+      if (res.progress?.currentCode) {
+        setCode(res.progress.currentCode);
+      } else {
+        setCode(DEFAULT_C_CODE);
+      }
+
+      if (!res.progress?.compilerAllowed) {
+        navigate(`/exams/${examId}/paper?questionId=${res.question?._id}`, { replace: true });
+        return;
+      }
+
+      if (res.question?._id && res.question._id !== currentQId) {
+        setSearchParams({ questionId: res.question._id });
+      }
+    } catch (err) {
+      setErrorMsg(
+        err.response?.data?.message || "Failed to load examination question."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const fetchExamInfo = async () => {
-      try {
-        setLoading(true);
-        setErrorMsg("");
-        const res = await getMyAssignedQuestion(examId);
-        setData(res);
-
-        if (!res.progress?.compilerAllowed) {
-          navigate(`/exams/${examId}/paper`, { replace: true });
-        }
-      } catch (err) {
-        setErrorMsg(
-          err.response?.data?.message || "Failed to load examination question."
-        );
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchExamInfo();
-  }, [examId, navigate]);
+    fetchExamInfo(currentQId);
+  }, [examId, currentQId]);
 
   // Exam Countdown Timer
   useEffect(() => {
@@ -134,13 +148,17 @@ const ExamCodeEditorPage = () => {
       setRunResult(null);
       setActiveTab("run");
 
-      const res = await runExamCode(examId, code);
+      const res = await runExamCode(examId, code, data?.question?._id);
       setRunResult(res);
     } catch (err) {
       setErrorMsg(err.response?.data?.message || "Code execution failed.");
     } finally {
       setRunning(false);
     }
+  };
+
+  const handleSelectQuestion = (qId) => {
+    setSearchParams({ questionId: qId });
   };
 
   const handleSubmit = async () => {
@@ -163,13 +181,17 @@ const ExamCodeEditorPage = () => {
       setSubmitResult(null);
       setActiveTab("submit");
 
-      const res = await submitExamCode(examId, code);
+      const res = await submitExamCode(examId, code, data?.question?._id);
       setSubmitResult(res);
 
       if (res.allPassed) {
-        setTimeout(() => {
-          navigate(`/exams/${examId}/completed`);
-        }, 1200);
+        if (res.isExamCompleted) {
+          setTimeout(() => {
+            navigate(`/exams/${examId}/completed`);
+          }, 1200);
+        } else {
+          await fetchExamInfo(data?.question?._id);
+        }
       }
     } catch (err) {
       setErrorMsg(err.response?.data?.message || "Submission grading failed.");
@@ -311,7 +333,7 @@ const ExamCodeEditorPage = () => {
         {/* Center / Right Toolbar */}
         <div className="flex items-center gap-3">
           <Link
-            to={`/exams/${examId}/paper`}
+            to={`/exams/${examId}/paper?questionId=${question._id}`}
             className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-300 hover:text-white border border-slate-700 rounded-lg hover:bg-slate-800 transition"
           >
             <FileText className="w-3.5 h-3.5" /> Paper Notes
@@ -343,6 +365,44 @@ const ExamCodeEditorPage = () => {
           </button>
         </div>
       </header>
+
+      {/* Multi-Question Selector Bar (when assigned questions > 1) */}
+      {data.questions && data.questions.length > 1 && (
+        <div className="bg-slate-900 border-b border-slate-800 px-4 sm:px-6 py-2 flex items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-2 overflow-x-auto py-0.5">
+            <span className="text-slate-400 font-bold uppercase tracking-wider text-[11px] whitespace-nowrap">
+              Questions ({data.questions.length}):
+            </span>
+            {data.questions.map((qItem, idx) => {
+              const isActive = qItem._id === question._id || (data.currentIndex ?? 0) === idx;
+              return (
+                <button
+                  key={qItem._id || idx}
+                  type="button"
+                  onClick={() => handleSelectQuestion(qItem._id)}
+                  className={`px-3 py-1 rounded-lg font-bold text-xs transition flex items-center gap-1.5 whitespace-nowrap ${
+                    isActive
+                      ? "bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-400"
+                      : "bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white"
+                  }`}
+                >
+                  <span>{qItem.questionNumber || `Q${idx + 1}`}</span>
+                  {qItem.isCompleted ? (
+                    <span className="text-emerald-400 font-bold">✓</span>
+                  ) : qItem.compilerAllowed ? (
+                    <span className="text-emerald-400 text-[10px]">●</span>
+                  ) : (
+                    <span className="text-amber-400 text-[10px]">🔒</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          <div className="text-slate-400 font-medium whitespace-nowrap hidden sm:block">
+            Question {(data.currentIndex ?? 0) + 1} of {data.questions.length}
+          </div>
+        </div>
+      )}
 
       {/* Main Split Body */}
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">

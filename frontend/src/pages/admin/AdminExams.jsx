@@ -22,7 +22,8 @@ import Loader from "../../components/common/Loader";
 
 const AdminExams = () => {
   const [searchParams, setSearchParams] = useSearchParams();
-  const activeType = searchParams.get("type") === "external" ? "external" : "internal";
+  const typeParam = searchParams.get("type");
+  const activeType = ["external", "viva"].includes(typeParam) ? typeParam : "internal";
 
   const [exams, setExams] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -133,12 +134,12 @@ const AdminExams = () => {
             <h1 className="text-3xl font-bold text-slate-800">
               Examination Management
             </h1>
-            <span className="rounded-full bg-indigo-100 px-2.5 py-0.5 text-xs font-bold text-indigo-700">
-              {totalExamsCount} {activeType === "internal" ? "Internal" : "External"}
+            <span className="rounded-full bg-indigo-100 px-2.5 py-0.5 text-xs font-bold text-indigo-700 capitalize">
+              {totalExamsCount} {activeType === "viva" ? "Viva MCQ" : activeType}
             </span>
           </div>
           <p className="mt-1 text-sm text-slate-500">
-            Create, allocate random questions, schedule, and monitor Internal and External exams.
+            Create, allocate questions, schedule, and monitor Internal, External, and AI-powered Viva MCQ exams.
           </p>
         </div>
 
@@ -158,7 +159,7 @@ const AdminExams = () => {
             className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm shadow-indigo-200 transition hover:bg-indigo-700"
           >
             <Plus size={17} />
-            Create {activeType === "internal" ? "Internal" : "External"} Exam
+            Create {activeType === "internal" ? "Internal" : activeType === "external" ? "External" : "Viva"} Exam
           </Link>
         </div>
       </div>
@@ -261,6 +262,27 @@ const AdminExams = () => {
               }`}
             >
               {activeType === "external" ? totalExamsCount : "•"}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleTypeChange("viva")}
+            className={`flex items-center gap-2 border-b-2 px-5 py-2.5 text-sm font-bold transition -mb-[9px] ${
+              activeType === "viva"
+                ? "border-indigo-600 text-indigo-600"
+                : "border-transparent text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            <span>Viva Exams (MCQ)</span>
+            <span
+              className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                activeType === "viva"
+                  ? "bg-indigo-100 text-indigo-700"
+                  : "bg-slate-100 text-slate-600"
+              }`}
+            >
+              {activeType === "viva" ? totalExamsCount : "•"}
             </span>
           </button>
         </div>

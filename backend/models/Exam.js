@@ -29,9 +29,28 @@ const examSchema = new mongoose.Schema(
     },
     examType: {
       type: String,
-      enum: ["internal", "external"],
+      enum: ["internal", "external", "viva"],
       required: true,
       index: true,
+    },
+    marksPerQuestion: {
+      type: Number,
+      default: 1,
+      min: 0,
+    },
+    negativeMarking: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    negativeMarkingEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    maxAttempts: {
+      type: Number,
+      default: 1,
+      min: 1,
     },
     examDate: {
       type: Date,
@@ -57,6 +76,11 @@ const examSchema = new mongoose.Schema(
       required: true,
       min: 1,
       default: 100,
+    },
+    questionsPerStudent: {
+      type: Number,
+      min: 1,
+      default: 1,
     },
     instructions: {
       type: String,
@@ -87,6 +111,31 @@ const examSchema = new mongoose.Schema(
         ref: "User",
       },
     ],
+    examCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      uppercase: true,
+      trim: true,
+      index: true,
+    },
+    enrolledStudents: [
+      {
+        studentId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: true,
+        },
+        enrolledAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+    enrollmentClosed: {
+      type: Boolean,
+      default: false,
+    },
     startedAt: {
       type: Date,
       default: null,

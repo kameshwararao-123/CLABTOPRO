@@ -30,6 +30,7 @@ const examAnswerSubmissionSchema = new mongoose.Schema(
     },
     aiEvaluation: {
       errorPercentage: { type: Number, default: 0 },
+      understandingPercentage: { type: Number, default: 0 },
       rawScore: { type: Number, default: 0 },
       identifiedIssues: [
         {
@@ -41,12 +42,40 @@ const examAnswerSubmissionSchema = new mongoose.Schema(
       ],
       missingConcepts: [String],
       strengths: [String],
+      incorrectConcepts: [String],
       evaluationConfidence: { type: Number, default: 1 },
       feedbackSummary: { type: String, default: "" },
     },
     isApproved: {
       type: Boolean,
       default: false,
+    },
+    status: {
+      type: String,
+      enum: ["submitted", "evaluating", "evaluated", "approved", "correction_required"],
+      default: "submitted",
+    },
+    facultyDecision: {
+      type: String,
+      enum: ["pending", "allow_to_code", "return_to_notepad"],
+      default: "pending",
+    },
+    facultyDecisionAt: {
+      type: Date,
+      default: null,
+    },
+    facultyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    facultyFeedback: {
+      type: String,
+      default: "",
+    },
+    evaluatedAt: {
+      type: Date,
+      default: null,
     },
     submittedAt: {
       type: Date,

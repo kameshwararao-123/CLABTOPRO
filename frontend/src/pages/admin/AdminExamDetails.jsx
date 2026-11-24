@@ -22,6 +22,13 @@ import {
   Sparkles,
   UploadCloud,
   Download,
+  Activity,
+  RotateCcw,
+  AlertTriangle,
+  Eye,
+  X,
+  Copy,
+  KeyRound,
 } from "lucide-react";
 import {
   getExamById,
@@ -33,6 +40,10 @@ import {
   startExam,
   completeExam,
   getExamMonitoring,
+  facultyEvaluateStudentPaper,
+  facultyAuthorizeCompiler,
+  facultyReturnToNotepad,
+  getStudentConceptualReport,
 } from "../../services/examService";
 import Loader from "../../components/common/Loader";
 import ExamQuestionUploadModal from "../../components/exam/ExamQuestionUploadModal";
@@ -55,9 +66,20 @@ const AdminExamDetails = () => {
   const [questions, setQuestions] = useState([]);
   const [allocations, setAllocations] = useState([]);
   const [monitoringData, setMonitoringData] = useState(null);
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
+  const [monitoringSearch, setMonitoringSearch] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [questionsPerStudentInput, setQuestionsPerStudentInput] = useState(1);
+
+  // Faculty Evaluation & Code Authorization State
+  const [evaluatingStudentId, setEvaluatingStudentId] = useState(null);
+  const [conceptualReportModal, setConceptualReportModal] = useState(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [decisionLoading, setDecisionLoading] = useState(false);
+  const [facultyFeedbackInput, setFacultyFeedbackInput] = useState("");
 
   // Student selection state
   const [candidateStudents, setCandidateStudents] = useState([]);
@@ -105,6 +127,9 @@ const AdminExamDetails = () => {
       setExam(data.exam);
       setQuestions(data.questions || []);
       setAllocations(data.allocations || []);
+      if (data.exam?.questionsPerStudent) {
+        setQuestionsPerStudentInput(data.exam.questionsPerStudent);
+      }
 
       if (data.exam?.participatingStudents) {
         const ids = new Set(
@@ -164,15 +189,36 @@ const AdminExamDetails = () => {
     }
   }, [activeTab]);
 
+  useEffect(() => {
+    if (activeTab !== "monitoring" || !autoRefreshEnabled) return;
+    const interval = setInterval(() => {
+      fetchMonitoring();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [activeTab, autoRefreshEnabled, examId]);
+
   const handleStartExam = async () => {
-    if (!window.confirm("Are you sure you want to start this exam now? Students will immediately be allowed to begin.")) {
+    const k = parseInt(questionsPerStudentInput, 10);
+    if (isNaN(k) || k < 1) {
+      setErrorMsg("Please specify a valid number of questions per student (at least 1).");
+      return;
+    }
+
+    if (k > questions.length) {
+      setErrorMsg(
+        `Insufficient questions! Bank has ${questions.length} question(s), but ${k} per student were requested.`
+      );
+      return;
+    }
+
+    if (!window.confirm(`Start this examination now? Questions will be automatically allocated (${k} per student) to all enrolled students using server-side Fisher-Yates shuffle.`)) {
       return;
     }
     try {
       setActionLoading(true);
       setErrorMsg("");
-      await startExam(examId);
-      setSuccessMsg("Exam has been successfully started and is now In Progress.");
+      const res = await startExam(examId, k);
+      setSuccessMsg(res.message || "Exam has been successfully started with question allocations.");
       await fetchExamDetails();
       handleTabChange("monitoring");
     } catch (err) {
@@ -196,6 +242,128 @@ const AdminExamDetails = () => {
       setErrorMsg(err.response?.data?.message || "Failed to complete exam.");
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  // Faculty Evaluation & Code Authorization Handlers
+  const handleFacultyEvaluate = async (studentRow) => {
+    try {
+      setEvaluatingStudentId(studentRow.studentId);
+      setErrorMsg("");
+      setSuccessMsg("");
+      const res = await facultyEvaluateStudentPaper(
+        examId,
+        studentRow.studentId,
+        studentRow.targetQuestionId
+      );
+      setConceptualReportModal({
+        studentId: studentRow.studentId,
+        studentName: studentRow.username,
+        rollNo: studentRow.rollNo,
+        questionId: studentRow.targetQuestionId,
+        questionTitle: res.questionTitle || studentRow.assignedQuestion,
+        conceptualAnswer: res.conceptualAnswer || studentRow.lastConceptualAnswer,
+        understandingPercentage: res.understandingPercentage,
+        errorPercentage: res.errorPercentage,
+        correctConcepts: res.correctConcepts || [],
+        missingConcepts: res.missingConcepts || [],
+        incorrectConcepts: res.incorrectConcepts || [],
+        suggestions: res.suggestions || [],
+        feedbackSummary: res.feedbackSummary || "",
+        canAllowToCode: res.canAllowToCode,
+        requiresRevision: res.requiresRevision,
+        attemptNumber: res.attemptNumber,
+        report: res.report,
+      });
+      setFacultyFeedbackInput(
+        res.errorPercentage >= 50
+          ? "Your conceptual answer requires improvement. Please review the faculty feedback and correct your answer before resubmitting."
+          : ""
+      );
+      setSuccessMsg(`AI evaluation completed for ${studentRow.username} (Error: ${res.errorPercentage}%).`);
+      await fetchMonitoring();
+    } catch (err) {
+      setErrorMsg(err.response?.data?.message || "Failed to perform AI evaluation.");
+    } finally {
+      setEvaluatingStudentId(null);
+    }
+  };
+
+  const handleOpenReportModal = async (studentRow) => {
+    try {
+      setReportLoading(true);
+      setErrorMsg("");
+      const res = await getStudentConceptualReport(
+        examId,
+        studentRow.studentId,
+        studentRow.targetQuestionId
+      );
+      const latestSub = res.latestSubmission;
+      const aiEval = latestSub?.aiEvaluation || studentRow.aiEvaluation || {};
+      const err = aiEval.errorPercentage ?? studentRow.lastConceptualError ?? 0;
+      const und = aiEval.understandingPercentage ?? Math.max(0, 100 - err);
+
+      setConceptualReportModal({
+        studentId: studentRow.studentId,
+        studentName: studentRow.username,
+        rollNo: studentRow.rollNo,
+        questionId: studentRow.targetQuestionId,
+        questionTitle: latestSub?.questionId?.title || studentRow.assignedQuestion,
+        conceptualAnswer: latestSub?.answerText || studentRow.lastConceptualAnswer,
+        understandingPercentage: und,
+        errorPercentage: err,
+        correctConcepts: aiEval.strengths || aiEval.correctConcepts || [],
+        missingConcepts: aiEval.missingConcepts || [],
+        incorrectConcepts: (aiEval.identifiedIssues || []).map((i) => `${i.criterion}: ${i.description}`),
+        suggestions: (aiEval.identifiedIssues || []).map((i) => i.hint).filter(Boolean),
+        feedbackSummary: aiEval.feedbackSummary || "",
+        canAllowToCode: err < 50,
+        requiresRevision: err >= 50,
+        attemptNumber: latestSub?.attemptNumber || studentRow.conceptualAttemptsCount || 1,
+        allAttempts: res.allAttempts || [],
+        progress: res.progress,
+        isApproved: Boolean(studentRow.conceptualApproved || res.progress?.compilerAllowed),
+      });
+      setFacultyFeedbackInput(
+        latestSub?.facultyFeedback ||
+          (err >= 50
+            ? "Your conceptual answer requires improvement. Please review the faculty feedback and correct your answer before resubmitting."
+            : "")
+      );
+    } catch (err) {
+      setErrorMsg(err.response?.data?.message || "Failed to load conceptual report.");
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  const handleFacultyAllowToCode = async (studentId, questionId) => {
+    try {
+      setDecisionLoading(true);
+      setErrorMsg("");
+      await facultyAuthorizeCompiler(examId, studentId, questionId);
+      setSuccessMsg("Compiler access granted. Student authorized to code.");
+      setConceptualReportModal(null);
+      await fetchMonitoring();
+    } catch (err) {
+      setErrorMsg(err.response?.data?.message || "Failed to authorize compiler access.");
+    } finally {
+      setDecisionLoading(false);
+    }
+  };
+
+  const handleFacultyReturnToNotepad = async (studentId, questionId, feedback) => {
+    try {
+      setDecisionLoading(true);
+      setErrorMsg("");
+      await facultyReturnToNotepad(examId, studentId, questionId, feedback);
+      setSuccessMsg("Student returned to Notepad for revision with feedback.");
+      setConceptualReportModal(null);
+      await fetchMonitoring();
+    } catch (err) {
+      setErrorMsg(err.response?.data?.message || "Failed to return student to Notepad.");
+    } finally {
+      setDecisionLoading(false);
     }
   };
 
@@ -437,6 +605,39 @@ const AdminExamDetails = () => {
             Subject: <strong className="text-slate-700 font-semibold">{exam.subject}</strong> • Academic Year:{" "}
             {exam.academicYear} • Semester: {exam.semester}
           </p>
+
+          {/* Exam Code Display & Copy */}
+          {exam.examCode && (
+            <div className="mt-3 inline-flex items-center gap-2.5 rounded-xl border border-indigo-200 bg-indigo-50/70 px-3.5 py-1.5 text-xs text-indigo-900 shadow-xs">
+              <KeyRound size={15} className="text-indigo-600" />
+              <span>Exam Code:</span>
+              <span className="font-mono text-sm font-extrabold tracking-wider text-indigo-700">
+                {exam.examCode}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(exam.examCode);
+                  setCopiedCode(true);
+                  setTimeout(() => setCopiedCode(false), 2000);
+                }}
+                className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[11px] font-bold text-indigo-700 hover:bg-indigo-100 transition border border-indigo-200"
+                title="Copy Exam Code to share with students"
+              >
+                {copiedCode ? (
+                  <>
+                    <Check size={12} className="text-emerald-600" />
+                    <span className="text-emerald-700">Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy size={12} />
+                    <span>Copy Exam Code</span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Action Controls */}
@@ -452,18 +653,34 @@ const AdminExamDetails = () => {
           </button>
 
           {!isInProgress && !isCompleted && (
-            <button
-              onClick={handleStartExam}
-              disabled={actionLoading || allocations.length === 0}
-              className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
-              title={
-                allocations.length === 0
-                  ? "Execute question allocation before starting exam"
-                  : "Start examination"
-              }
-            >
-              <Play size={16} /> Start Exam
-            </button>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs shadow-xs" title="Questions per student allocated on start">
+                <span className="font-medium text-slate-500 whitespace-nowrap">Q / Student:</span>
+                <input
+                  type="number"
+                  min="1"
+                  max={questions.length || 1}
+                  value={questionsPerStudentInput}
+                  onChange={(e) => setQuestionsPerStudentInput(e.target.value)}
+                  className="w-12 rounded-lg border border-slate-300 px-1.5 py-0.5 text-center font-bold text-slate-800 outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              <button
+                onClick={handleStartExam}
+                disabled={actionLoading || enrolledCount === 0 || questions.length === 0}
+                className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                title={
+                  enrolledCount === 0
+                    ? "Wait for students to enroll via exam code before starting"
+                    : questions.length === 0
+                    ? "Add questions to exam bank before starting"
+                    : "Start examination and allocate questions"
+                }
+              >
+                <Play size={16} /> Start Exam
+              </button>
+            </div>
           )}
 
           {isInProgress && (
@@ -543,11 +760,17 @@ const AdminExamDetails = () => {
               <Shuffle size={20} />
             </div>
             <span className="text-[11px] font-semibold text-emerald-600 uppercase tracking-wider">
-              1-to-1
+              Allocation
             </span>
           </div>
-          <p className="text-xs sm:text-sm font-medium text-slate-500">Allocated Count</p>
-          <p className="mt-1 text-2xl font-bold text-emerald-600">{allocations.length}</p>
+          <p className="text-xs sm:text-sm font-medium text-slate-500">
+            {isInProgress || isCompleted ? "Allocated Count" : "Q Per Student"}
+          </p>
+          <p className="mt-1 text-2xl font-bold text-emerald-600">
+            {isInProgress || isCompleted
+              ? allocations.length
+              : `${exam.questionsPerStudent || questionsPerStudentInput} (on Start)`}
+          </p>
         </div>
 
         <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 shadow-xs">
@@ -786,7 +1009,7 @@ const AdminExamDetails = () => {
             <div>
               <h2 className="text-lg font-bold text-slate-800">Enrolled Student Roster</h2>
               <p className="text-xs text-slate-500">
-                Select the eligible students who are registered to take this {exam.examType} examination.
+                Students can join directly using the Exam Code. You can also manually add/adjust candidates below if needed.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -800,6 +1023,66 @@ const AdminExamDetails = () => {
               </button>
             </div>
           </div>
+
+          {/* Exam Code Quick Share Box */}
+          {exam.examCode && (
+            <div className="rounded-2xl border border-indigo-200 bg-gradient-to-r from-indigo-50/70 via-purple-50/40 to-white p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+              <div className="flex items-center gap-3">
+                <div className="rounded-xl bg-indigo-600 p-2 text-white shadow-xs">
+                  <KeyRound size={18} />
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-slate-800">Exam Code Enrollment Active</h4>
+                  <p className="text-xs text-slate-500">
+                    Share this code with students. When students join, questions are assigned automatically!
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-base font-extrabold text-indigo-700 bg-white px-3 py-1.5 rounded-lg border border-indigo-200">
+                  {exam.examCode}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(exam.examCode);
+                    setCopiedCode(true);
+                    setTimeout(() => setCopiedCode(false), 2000);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-bold text-white hover:bg-indigo-700 transition shadow-xs"
+                >
+                  {copiedCode ? <Check size={14} /> : <Copy size={14} />}
+                  <span>{copiedCode ? "Copied" : "Copy Code"}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Enrolled Students Summary */}
+          {exam.enrolledStudents?.length > 0 && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs">
+              <h3 className="text-sm font-bold text-slate-800 mb-2">
+                Code-Enrolled Students ({exam.enrolledStudents.length})
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                {exam.enrolledStudents.map((enr, idx) => {
+                  const studentObj = enr.studentId && typeof enr.studentId === "object" ? enr.studentId : null;
+                  return (
+                    <span
+                      key={enr._id || idx}
+                      className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200"
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                      {studentObj ? `${studentObj.username} (${studentObj.rollNo || "N/A"})` : "Student"}
+                      <span className="text-[10px] text-slate-400">
+                        {enr.enrolledAt ? new Date(enr.enrolledAt).toLocaleTimeString() : ""}
+                      </span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Search & Bulk Selection Bar */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3">
@@ -937,9 +1220,9 @@ const AdminExamDetails = () => {
           {allocations.length === 0 ? (
             <div className="rounded-2xl border border-slate-200 bg-white p-12 text-center shadow-xs">
               <Shuffle size={36} className="text-slate-300 mx-auto mb-2" />
-              <h3 className="font-bold text-slate-800">No questions allocated yet</h3>
+              <h3 className="font-bold text-slate-800">Questions Allocated Upon Exam Start</h3>
               <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-                Once questions are added and students are enrolled, click &ldquo;Run Fisher-Yates Allocation&rdquo; to assign unique questions.
+                Students enroll using the Exam Code. Once you click &ldquo;Start Exam&rdquo;, server-side Fisher-Yates allocation assigns {questionsPerStudentInput} distinct question(s) to every enrolled student automatically.
               </p>
             </div>
           ) : (
@@ -951,36 +1234,51 @@ const AdminExamDetails = () => {
                       <th className="px-5 py-3.5 w-12 text-center">#</th>
                       <th className="px-5 py-3.5">Roll No</th>
                       <th className="px-5 py-3.5">Student Name</th>
-                      <th className="px-5 py-3.5">Assigned Question</th>
-                      <th className="px-5 py-3.5">Difficulty</th>
+                      <th className="px-5 py-3.5">Assigned Questions</th>
                       <th className="px-5 py-3.5">Allocated Timestamp</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-700">
-                    {allocations.map((alloc, idx) => (
-                      <tr key={alloc._id} className="transition hover:bg-slate-50/60">
-                        <td className="px-5 py-3.5 text-center text-slate-400 font-mono text-xs">
-                          {idx + 1}
-                        </td>
-                        <td className="px-5 py-3.5 font-semibold text-slate-900">
-                          {alloc.studentId?.rollNo || "N/A"}
-                        </td>
-                        <td className="px-5 py-3.5 font-medium text-slate-800">
-                          {alloc.studentId?.username}
-                        </td>
-                        <td className="px-5 py-3.5 font-semibold text-indigo-700">
-                          {alloc.questionId?.title || "Unknown Question"}
-                        </td>
-                        <td className="px-5 py-3.5">
-                          <span className="text-xs px-2.5 py-0.5 bg-slate-100 rounded-full text-slate-700 font-semibold">
-                            {alloc.questionId?.difficulty || "Medium"}
-                          </span>
-                        </td>
-                        <td className="px-5 py-3.5 text-xs text-slate-500">
-                          {alloc.allocatedAt ? new Date(alloc.allocatedAt).toLocaleTimeString() : "-"}
-                        </td>
-                      </tr>
-                    ))}
+                    {allocations.map((alloc, idx) => {
+                      const assigned =
+                        alloc.assignedQuestionIds && alloc.assignedQuestionIds.length > 0
+                          ? alloc.assignedQuestionIds
+                          : alloc.questionId
+                          ? [alloc.questionId]
+                          : [];
+                      return (
+                        <tr key={alloc._id} className="transition hover:bg-slate-50/60">
+                          <td className="px-5 py-3.5 text-center text-slate-400 font-mono text-xs">
+                            {idx + 1}
+                          </td>
+                          <td className="px-5 py-3.5 font-semibold text-slate-900">
+                            {alloc.studentId?.rollNo || "N/A"}
+                          </td>
+                          <td className="px-5 py-3.5 font-medium text-slate-800">
+                            <div>{alloc.studentId?.username}</div>
+                            <div className="text-[11px] text-slate-400">{alloc.studentId?.email}</div>
+                          </td>
+                          <td className="px-5 py-3.5">
+                            <div className="flex flex-wrap gap-1.5">
+                              {assigned.map((q, qIdx) => (
+                                <span
+                                  key={q._id || qIdx}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-50 text-indigo-700 text-xs font-semibold border border-indigo-200"
+                                >
+                                  <span>{q.questionNumber || `Q${qIdx + 1}`}:</span>
+                                  <span className="font-normal text-slate-700 truncate max-w-[180px]">
+                                    {q.title || "Question"}
+                                  </span>
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="px-5 py-3.5 text-xs text-slate-500">
+                            {alloc.allocatedAt ? new Date(alloc.allocatedAt).toLocaleTimeString() : "-"}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -996,112 +1294,499 @@ const AdminExamDetails = () => {
         <div className="space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-bold text-slate-800">Live Examination Monitoring</h2>
+              <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <Activity size={20} className="text-indigo-600" />
+                Live Examination Monitoring
+              </h2>
               <p className="text-xs text-slate-500">
-                Track student conceptual answer evaluation error rates, compiler unlocking, and test cases passed in real time.
+                Track student conceptual answer submissions, faculty-controlled AI evaluation, compiler unlocking, and sandbox test case results in real time.
               </p>
             </div>
-            <button
-              type="button"
-              onClick={fetchMonitoring}
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition shadow-xs"
-            >
-              <RefreshCw size={14} /> Refresh Live Metrics
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setAutoRefreshEnabled(!autoRefreshEnabled)}
+                className={`inline-flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold border transition shadow-xs ${
+                  autoRefreshEnabled
+                    ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                    : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
+                }`}
+                title={autoRefreshEnabled ? "Pause automatic polling" : "Resume 5-second automatic polling"}
+              >
+                <span className="relative flex h-2 w-2">
+                  {autoRefreshEnabled && (
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  )}
+                  <span
+                    className={`relative inline-flex rounded-full h-2 w-2 ${
+                      autoRefreshEnabled ? "bg-emerald-500" : "bg-slate-400"
+                    }`}
+                  ></span>
+                </span>
+                {autoRefreshEnabled ? "Live Polling (5s): ON" : "Auto-Refresh: OFF"}
+              </button>
+              <button
+                type="button"
+                onClick={fetchMonitoring}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition shadow-xs"
+              >
+                <RefreshCw size={14} className={actionLoading ? "animate-spin" : ""} /> Refresh Live Metrics
+              </button>
+            </div>
+          </div>
+
+          {/* Search Bar */}
+          <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs">
+            <div className="relative flex-1 max-w-md">
+              <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Search candidates by name or roll number..."
+                value={monitoringSearch}
+                onChange={(e) => setMonitoringSearch(e.target.value)}
+                className="w-full pl-9 pr-3.5 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50/60 focus:bg-white focus:border-indigo-500 focus:outline-hidden transition"
+              />
+              {monitoringSearch && (
+                <button
+                  type="button"
+                  onClick={() => setMonitoringSearch("")}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-600"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
           </div>
 
           {!monitoringData ? (
-            <div className="py-12 text-center text-sm text-slate-500">Loading monitoring data...</div>
+            <div className="py-12 text-center text-sm text-slate-500 bg-white rounded-2xl border border-slate-200">
+              <Loader />
+              <p className="mt-2 text-xs text-slate-400">Loading live monitoring data...</p>
+            </div>
           ) : (
             <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[800px] text-left text-sm">
+                <table className="w-full min-w-[960px] text-left text-sm">
                   <thead>
                     <tr className="border-b border-slate-100 bg-slate-50/70 text-xs font-semibold uppercase tracking-wider text-slate-500">
                       <th className="px-5 py-3.5">Roll No</th>
                       <th className="px-5 py-3.5">Student Name</th>
                       <th className="px-5 py-3.5">Assigned Problem</th>
-                      <th className="px-5 py-3.5">Exam Stage</th>
-                      <th className="px-5 py-3.5">AI Paper Evaluation</th>
-                      <th className="px-5 py-3.5">Compiler Status</th>
-                      <th className="px-5 py-3.5">Sandbox Code Execution</th>
+                      <th className="px-5 py-3.5 text-center">Notepad Status</th>
+                      <th className="px-5 py-3.5 text-center">AI Evaluation</th>
+                      <th className="px-5 py-3.5 text-center">Evaluation Action</th>
+                      <th className="px-5 py-3.5 text-center">Compiler</th>
+                      <th className="px-5 py-3.5 text-center">Test Cases</th>
+                      <th className="px-5 py-3.5 text-center">Exam Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-700">
-                    {monitoringData.students?.map((row) => (
-                      <tr key={row.studentId} className="transition hover:bg-slate-50/60">
-                        <td className="px-5 py-3.5 font-semibold text-slate-900">
-                          {row.rollNo || "-"}
-                        </td>
-                        <td className="px-5 py-3.5 font-medium text-slate-800">
-                          {row.username}
-                        </td>
-                        <td className="px-5 py-3.5 text-xs text-slate-600 max-w-[200px] truncate">
-                          {row.assignedQuestion}
-                        </td>
-                        <td className="px-5 py-3.5">
-                          <span
-                            className={`text-xs px-2.5 py-0.5 rounded-full font-semibold capitalize ${
-                              row.status === "completed"
-                                ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                                : row.status === "execution_allowed"
-                                ? "bg-indigo-50 text-indigo-700 border border-indigo-200"
-                                : row.status === "correction_required"
-                                ? "bg-amber-50 text-amber-700 border border-amber-200"
-                                : "bg-slate-100 text-slate-700"
-                            }`}
-                          >
-                            {row.status.replace("_", " ")}
-                          </span>
-                        </td>
-                        <td className="px-5 py-3.5">
-                          {row.lastConceptualError !== null ? (
+                    {(monitoringData.students || [])
+                      .filter((s) => {
+                        if (!monitoringSearch.trim()) return true;
+                        const q = monitoringSearch.trim().toLowerCase();
+                        return (
+                          s.rollNo?.toLowerCase().includes(q) ||
+                          s.username?.toLowerCase().includes(q) ||
+                          s.email?.toLowerCase().includes(q)
+                        );
+                      })
+                      .map((row) => (
+                        <tr key={row.studentId} className="transition hover:bg-slate-50/60">
+                          {/* 1. Roll No */}
+                          <td className="px-5 py-3.5 font-semibold text-slate-900 font-mono text-xs">
+                            {row.rollNo || "—"}
+                          </td>
+
+                          {/* 2. Student Name */}
+                          <td className="px-5 py-3.5">
+                            <div className="font-semibold text-slate-900 text-sm">{row.username}</div>
+                            <div className="text-xs text-slate-400">{row.email || "No email"}</div>
+                          </td>
+
+                          {/* 3. Assigned Problem */}
+                          <td className="px-5 py-3.5 text-xs text-slate-600 max-w-[180px] truncate" title={row.assignedQuestion}>
+                            {row.assignedQuestion || "Not Assigned"}
+                          </td>
+
+                          {/* 4. Notepad Status */}
+                          <td className="px-5 py-3.5 text-center">
                             <span
-                              className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${
-                                row.lastConceptualError < 50
-                                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                                  : "bg-rose-50 text-rose-700 border border-rose-200"
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold capitalize border ${
+                                row.notepadStatus === "Submitted"
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : row.notepadStatus === "In Progress"
+                                  ? "bg-amber-50 text-amber-700 border-amber-200"
+                                  : row.notepadStatus === "Correction Required"
+                                  ? "bg-rose-50 text-rose-700 border-rose-200"
+                                  : "bg-slate-100 text-slate-600 border-slate-200"
                               }`}
                             >
-                              {row.lastConceptualError}% Error ({row.lastConceptualError < 50 ? "PASS" : "FAIL"})
+                              {row.notepadStatus || "Pending"}
                             </span>
-                          ) : (
-                            <span className="text-xs text-slate-400">Not Submitted</span>
-                          )}
-                        </td>
-                        <td className="px-5 py-3.5">
-                          {row.conceptualApproved ? (
-                            <span className="text-xs font-semibold text-emerald-600 inline-flex items-center gap-1.5">
-                              <CheckCircle2 size={14} /> Unlocked
-                            </span>
-                          ) : (
-                            <span className="text-xs text-slate-400 inline-flex items-center gap-1.5">
-                              <XCircle size={14} /> Locked
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-5 py-3.5">
-                          {row.totalTestCases > 0 ? (
+                          </td>
+
+                          {/* 5. AI Evaluation */}
+                          <td className="px-5 py-3.5 text-center">
+                            {row.lastConceptualError !== null ? (
+                              <span
+                                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border ${
+                                  row.lastConceptualError < 50
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : "bg-rose-50 text-rose-700 border-rose-200"
+                                }`}
+                              >
+                                {row.lastConceptualError < 50 ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
+                                {row.lastConceptualError}% Error ({row.lastConceptualError < 50 ? "PASS" : "FAIL"})
+                              </span>
+                            ) : row.status === "evaluating" || evaluatingStudentId === row.studentId ? (
+                              <span className="inline-flex items-center gap-1 text-xs text-indigo-600 font-semibold">
+                                <Sparkles size={13} className="animate-spin" /> Evaluating...
+                              </span>
+                            ) : row.notepadStatus === "Submitted" ? (
+                              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
+                                Awaiting Faculty Evaluation
+                              </span>
+                            ) : (
+                              <span className="text-xs text-slate-400">Not Submitted</span>
+                            )}
+                          </td>
+
+                          {/* 6. Evaluation Action (Faculty-Controlled) */}
+                          <td className="px-5 py-3.5 text-center">
+                            {row.evaluationAction === "evaluating" || evaluatingStudentId === row.studentId ? (
+                              <button
+                                type="button"
+                                disabled
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 text-slate-500 text-xs font-semibold cursor-not-allowed border border-slate-200"
+                              >
+                                <RefreshCw size={13} className="animate-spin text-indigo-600" />
+                                Evaluating...
+                              </button>
+                            ) : row.evaluationAction === "evaluate" ? (
+                              <button
+                                type="button"
+                                onClick={() => handleFacultyEvaluate(row)}
+                                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-xs hover:shadow-sm transition transform active:scale-95"
+                              >
+                                <Sparkles size={13} className="text-indigo-200" />
+                                Evaluate
+                              </button>
+                            ) : row.evaluationAction === "allow_to_code" ? (
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  disabled={decisionLoading}
+                                  onClick={() => handleFacultyAllowToCode(row.studentId, row.targetQuestionId)}
+                                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition"
+                                  title="Allow student to access code editor (Error < 50%)"
+                                >
+                                  <Check size={13} />
+                                  Allow to Code
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenReportModal(row)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold transition"
+                                  title="View detailed AI evaluation report"
+                                >
+                                  <Eye size={12} />
+                                </button>
+                              </div>
+                            ) : row.evaluationAction === "return_to_notepad" ? (
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenReportModal(row)}
+                                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow-xs transition"
+                                  title="Review evaluation and return to Notepad (Error >= 50%)"
+                                >
+                                  <RotateCcw size={12} />
+                                  Return to Notepad
+                                </button>
+                              </div>
+                            ) : row.evaluationAction === "approved" || row.conceptualApproved ? (
+                              <div className="inline-flex items-center gap-1.5">
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                  <CheckCircle2 size={13} /> Unlocked
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenReportModal(row)}
+                                  className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold"
+                                >
+                                  Report
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-400 font-medium">Waiting</span>
+                            )}
+                          </td>
+
+                          {/* 7. Compiler Status */}
+                          <td className="px-5 py-3.5 text-center">
+                            {row.conceptualApproved ? (
+                              <span className="text-xs font-semibold text-emerald-600 inline-flex items-center gap-1.5">
+                                <CheckCircle2 size={14} /> Unlocked
+                              </span>
+                            ) : (
+                              <span className="text-xs text-slate-400 inline-flex items-center gap-1.5">
+                                <XCircle size={14} /> Locked
+                              </span>
+                            )}
+                          </td>
+
+                          {/* 8. Test Cases */}
+                          <td className="px-5 py-3.5 text-center">
+                            {row.totalTestCases > 0 ? (
+                              <span
+                                className={`text-xs font-bold ${
+                                  row.testCasesPassed === row.totalTestCases
+                                    ? "text-emerald-600"
+                                    : "text-amber-600"
+                                }`}
+                              >
+                                {row.testCasesPassed} / {row.totalTestCases} Passed
+                              </span>
+                            ) : (
+                              <span className="text-xs text-slate-400 font-medium">—</span>
+                            )}
+                          </td>
+
+                          {/* 9. Exam Status */}
+                          <td className="px-5 py-3.5 text-center">
                             <span
-                              className={`text-xs font-bold ${
-                                row.testCasesPassed === row.totalTestCases
-                                  ? "text-emerald-600"
-                                  : "text-amber-600"
+                              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border shadow-2xs ${
+                                row.examStatus === "Successfully Completed"
+                                  ? "bg-emerald-100/80 text-emerald-800 border-emerald-300"
+                                  : row.examStatus === "Time Expired"
+                                  ? "bg-slate-200 text-slate-800 border-slate-300"
+                                  : row.examStatus === "Coding In Progress"
+                                  ? "bg-indigo-100/80 text-indigo-800 border-indigo-300"
+                                  : row.examStatus === "Test Cases Failed" || row.examStatus === "Conceptual Evaluation Failed"
+                                  ? "bg-rose-100/80 text-rose-800 border-rose-300"
+                                  : row.examStatus === "Waiting for Faculty Evaluation" || row.examStatus === "AI Evaluation in Progress"
+                                  ? "bg-amber-100/80 text-amber-800 border-amber-300"
+                                  : row.examStatus === "Waiting for Faculty Decision"
+                                  ? "bg-purple-100/80 text-purple-800 border-purple-300"
+                                  : row.examStatus === "Correction Required"
+                                  ? "bg-rose-100/80 text-rose-800 border-rose-300"
+                                  : "bg-slate-100 text-slate-600 border-slate-200"
                               }`}
                             >
-                              {row.testCasesPassed} / {row.totalTestCases} Tests Passed
+                              {row.examStatus || "Not Started"}
                             </span>
-                          ) : (
-                            <span className="text-xs text-slate-400">No code run yet</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                        </tr>
+                      ))}
                   </tbody>
                 </table>
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* =========================================================================
+          FACULTY AI EVALUATION REPORT & DECISION MODAL
+         ========================================================================= */}
+      {conceptualReportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 my-8 max-h-[92vh] flex flex-col">
+            {/* Modal Header */}
+            <div className="flex justify-between items-start pb-4 border-b border-slate-100 flex-shrink-0">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="p-1.5 rounded-lg bg-indigo-50 text-indigo-600 border border-indigo-100">
+                    <Sparkles size={18} />
+                  </span>
+                  <h3 className="text-lg font-bold text-slate-800">
+                    AI Evaluation Report &amp; Faculty Decision
+                  </h3>
+                </div>
+                <p className="text-xs text-slate-500 mt-1">
+                  Student: <strong className="text-slate-700">{conceptualReportModal.studentName}</strong> ({conceptualReportModal.rollNo || "No Roll No"}) •
+                  Question: <strong className="text-slate-700">{conceptualReportModal.questionTitle}</strong> •
+                  Attempt #{conceptualReportModal.attemptNumber}
+                </p>
+              </div>
+              <button
+                onClick={() => setConceptualReportModal(null)}
+                className="text-slate-400 hover:text-slate-600 rounded-lg p-1 transition"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="overflow-y-auto flex-1 pr-1 py-4 space-y-5">
+              {/* Metric Cards */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                  <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">
+                    Understanding Percentage
+                  </span>
+                  <span className="text-2xl font-black text-indigo-600 font-mono">
+                    {conceptualReportModal.understandingPercentage}%
+                  </span>
+                </div>
+
+                <div
+                  className={`p-3.5 rounded-xl border ${
+                    conceptualReportModal.errorPercentage < 50
+                      ? "bg-emerald-50/70 border-emerald-200 text-emerald-900"
+                      : "bg-rose-50/70 border-rose-200 text-rose-900"
+                  }`}
+                >
+                  <span className="text-xs font-semibold uppercase tracking-wider block">
+                    Error Percentage (Threshold: &lt;50%)
+                  </span>
+                  <span className="text-2xl font-black font-mono">
+                    {conceptualReportModal.errorPercentage}%
+                  </span>
+                  <span className="text-[11px] block mt-0.5 font-medium">
+                    {conceptualReportModal.errorPercentage < 50
+                      ? "✓ Meets conceptual passing threshold"
+                      : "✗ Revision required (>= 50% error)"}
+                  </span>
+                </div>
+              </div>
+
+              {/* Conceptual Answer Text */}
+              <div className="space-y-1.5">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">
+                  Submitted Conceptual Answer:
+                </span>
+                <div className="p-3.5 rounded-xl bg-slate-900 text-slate-200 font-mono text-xs max-h-44 overflow-y-auto whitespace-pre-wrap leading-relaxed border border-slate-800">
+                  {conceptualReportModal.conceptualAnswer || "(No answer text submitted)"}
+                </div>
+              </div>
+
+              {/* Correct Concepts (Strengths) */}
+              {conceptualReportModal.correctConcepts?.length > 0 && (
+                <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200 space-y-1.5">
+                  <span className="text-xs font-bold text-emerald-900 uppercase flex items-center gap-1.5">
+                    <CheckCircle2 size={14} className="text-emerald-600" />
+                    Correct Concepts:
+                  </span>
+                  <ul className="list-disc pl-5 text-xs text-emerald-800 space-y-1">
+                    {conceptualReportModal.correctConcepts.map((item, idx) => (
+                      <li key={idx}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Missing Concepts */}
+              {conceptualReportModal.missingConcepts?.length > 0 && (
+                <div className="p-3.5 rounded-xl bg-amber-50/60 border border-amber-200 space-y-1.5">
+                  <span className="text-xs font-bold text-amber-900 uppercase flex items-center gap-1.5">
+                    <AlertTriangle size={14} className="text-amber-600" />
+                    Missing Concepts:
+                  </span>
+                  <ul className="list-disc pl-5 text-xs text-amber-800 space-y-1">
+                    {conceptualReportModal.missingConcepts.map((item, idx) => (
+                      <li key={idx}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Incorrect Concepts / Identified Issues */}
+              {conceptualReportModal.incorrectConcepts?.length > 0 && (
+                <div className="p-3.5 rounded-xl bg-rose-50/60 border border-rose-200 space-y-1.5">
+                  <span className="text-xs font-bold text-rose-900 uppercase flex items-center gap-1.5">
+                    <XCircle size={14} className="text-rose-600" />
+                    Incorrect Concepts &amp; Logical Flaws:
+                  </span>
+                  <ul className="list-disc pl-5 text-xs text-rose-800 space-y-1">
+                    {conceptualReportModal.incorrectConcepts.map((item, idx) => (
+                      <li key={idx}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Suggestions for Improvement */}
+              {conceptualReportModal.suggestions?.length > 0 && (
+                <div className="p-3.5 rounded-xl bg-indigo-50/60 border border-indigo-200 space-y-1.5">
+                  <span className="text-xs font-bold text-indigo-900 uppercase flex items-center gap-1.5">
+                    <HelpCircle size={14} className="text-indigo-600" />
+                    Suggestions for Improvement &amp; Conceptual Hints:
+                  </span>
+                  <ul className="list-disc pl-5 text-xs text-indigo-800 space-y-1">
+                    {conceptualReportModal.suggestions.map((item, idx) => (
+                      <li key={idx}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Faculty Feedback input if returning to notepad */}
+              {conceptualReportModal.requiresRevision && (
+                <div className="space-y-1.5 pt-2">
+                  <label className="text-xs font-bold text-slate-700 block">
+                    Faculty Revision Note (Visible to Student):
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={facultyFeedbackInput}
+                    onChange={(e) => setFacultyFeedbackInput(e.target.value)}
+                    placeholder="e.g. Please explain loop termination and edge case handling for zero input..."
+                    className="w-full text-xs p-2.5 rounded-xl border border-slate-300 focus:outline-hidden focus:border-indigo-500"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer with Conditional Faculty Actions */}
+            <div className="flex items-center justify-between pt-4 border-t border-slate-100 flex-shrink-0">
+              <button
+                type="button"
+                onClick={() => setConceptualReportModal(null)}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition"
+              >
+                Close
+              </button>
+
+              <div className="flex items-center gap-2">
+                {/* Condition B: Error >= 50% -> Return to Notepad */}
+                {conceptualReportModal.requiresRevision ? (
+                  <button
+                    type="button"
+                    disabled={decisionLoading}
+                    onClick={() =>
+                      handleFacultyReturnToNotepad(
+                        conceptualReportModal.studentId,
+                        conceptualReportModal.questionId,
+                        facultyFeedbackInput
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 px-5 py-2 text-xs font-bold text-white shadow-xs transition disabled:opacity-50"
+                  >
+                    <RotateCcw size={14} />
+                    Return to Notepad
+                  </button>
+                ) : (
+                  /* Condition A: Error < 50% -> Allow to Code */
+                  <button
+                    type="button"
+                    disabled={decisionLoading}
+                    onClick={() =>
+                      handleFacultyAllowToCode(
+                        conceptualReportModal.studentId,
+                        conceptualReportModal.questionId
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-5 py-2 text-xs font-bold text-white shadow-xs transition disabled:opacity-50"
+                  >
+                    <Check size={14} />
+                    Allow to Code
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

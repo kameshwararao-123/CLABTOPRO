@@ -31,7 +31,12 @@ const Login = () => {
       setLoading(true);
       setError("");
 
-      const data = await loginUser(form);
+      const normalizedEmail = typeof form.email === "string" ? form.email.trim().toLowerCase() : form.email;
+
+      const data = await loginUser({
+        ...form,
+        email: normalizedEmail,
+      });
 
       login(data);
 

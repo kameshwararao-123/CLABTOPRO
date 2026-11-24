@@ -7,7 +7,8 @@ import Input from "../../components/common/Input";
 const CreateExam = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const initialType = searchParams.get("type") === "external" ? "external" : "internal";
+  const rawType = searchParams.get("type");
+  const initialType = ["external", "viva"].includes(rawType) ? rawType : "internal";
 
   const [form, setForm] = useState({
     title: "",
@@ -19,10 +20,16 @@ const CreateExam = () => {
     examDate: new Date().toISOString().split("T")[0],
     startTime: "10:00",
     endTime: "11:30",
-    durationMinutes: 90,
-    totalMarks: 100,
+    durationMinutes: initialType === "viva" ? 45 : 90,
+    totalMarks: initialType === "viva" ? 30 : 100,
+    marksPerQuestion: 1,
+    negativeMarking: 0.25,
+    negativeMarkingEnabled: false,
+    maxAttempts: 1,
     instructions:
-      "1. Do not switch tabs or minimize the examination window during the test.\n2. Write your conceptual solution, algorithm, and logic in the Paper Writing Notepad.\n3. You must score an error percentage below 50% on AI conceptual evaluation to unlock the code execution environment.\n4. Complete and test all visible test cases before submitting your final code.",
+      initialType === "viva"
+        ? "1. This is an AI-powered Multiple Choice Viva Examination.\n2. Read each question carefully and select the best option.\n3. You can navigate freely between questions using the question palette.\n4. You can mark questions for review and return to them later.\n5. Your answers are automatically saved as you select them.\n6. Do not switch tabs or minimize the window during the examination."
+        : "1. Do not switch tabs or minimize the examination window during the test.\n2. Write your conceptual solution, algorithm, and logic in the Paper Writing Notepad.\n3. You must score an error percentage below 50% on AI conceptual evaluation to unlock the code execution environment.\n4. Complete and test all visible test cases before submitting your final code.",
     maxConceptualAttempts: 3,
     status: "draft",
   });
@@ -31,10 +38,23 @@ const CreateExam = () => {
   const [error, setError] = useState("");
 
   const handleChange = (e) => {
-    const { name, value } = e.target;
+    const { name, value, type, checked } = e.target;
     setForm((prev) => ({
       ...prev,
-      [name]: value,
+      [name]: type === "checkbox" ? checked : value,
+    }));
+  };
+
+  const handleExamTypeChange = (type) => {
+    setForm((prev) => ({
+      ...prev,
+      examType: type,
+      durationMinutes: type === "viva" ? (prev.durationMinutes === 90 ? 45 : prev.durationMinutes) : prev.durationMinutes,
+      totalMarks: type === "viva" ? (prev.totalMarks === 100 ? 30 : prev.totalMarks) : prev.totalMarks,
+      instructions:
+        type === "viva"
+          ? "1. This is an AI-powered Multiple Choice Viva Examination.\n2. Read each question carefully and select the best option.\n3. You can navigate freely between questions using the question palette.\n4. You can mark questions for review and return to them later.\n5. Your answers are automatically saved as you select them.\n6. Do not switch tabs or minimize the window during the examination."
+          : "1. Do not switch tabs or minimize the examination window during the test.\n2. Write your conceptual solution, algorithm, and logic in the Paper Writing Notepad.\n3. You must score an error percentage below 50% on AI conceptual evaluation to unlock the code execution environment.\n4. Complete and test all visible test cases before submitting your final code.",
     }));
   };
 
@@ -72,10 +92,12 @@ const CreateExam = () => {
           </Link>
           <div>
             <h1 className="text-2xl font-bold text-slate-800">
-              Create {form.examType === "internal" ? "Internal" : "External"} Examination
+              Create {form.examType === "viva" ? "Viva (MCQ)" : form.examType === "internal" ? "Internal" : "External"} Examination
             </h1>
             <p className="text-xs text-slate-500">
-              Configure schedule, duration, conceptual evaluation rules, and student guidelines.
+              {form.examType === "viva"
+                ? "Configure MCQ questions, marks per question, negative marking, and viva instructions."
+                : "Configure schedule, duration, conceptual evaluation rules, and student guidelines."}
             </p>
           </div>
         </div>
@@ -94,18 +116,18 @@ const CreateExam = () => {
           <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">
             Examination Category
           </label>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <button
               type="button"
-              onClick={() => setForm((p) => ({ ...p, examType: "internal" }))}
+              onClick={() => handleExamTypeChange("internal")}
               className={`flex flex-col items-start p-4 rounded-xl border text-left transition ${
                 form.examType === "internal"
-                  ? "border-indigo-600 bg-indigo-50/40 text-indigo-900"
+                  ? "border-indigo-600 bg-indigo-50/40 text-indigo-900 ring-2 ring-indigo-500/20"
                   : "border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
               }`}
             >
               <div className="flex items-center justify-between w-full">
-                <span className="font-bold text-sm">Internal Examination</span>
+                <span className="font-bold text-sm">Internal Exam</span>
                 <span
                   className={`h-2.5 w-2.5 rounded-full ${
                     form.examType === "internal" ? "bg-indigo-600" : "bg-slate-300"
@@ -113,21 +135,21 @@ const CreateExam = () => {
                 />
               </div>
               <p className="text-xs text-slate-500 mt-1">
-                Mid-term assessments, internal lab exams, and continuous evaluations.
+                Mid-terms, internal coding assessments, and lab tests.
               </p>
             </button>
 
             <button
               type="button"
-              onClick={() => setForm((p) => ({ ...p, examType: "external" }))}
+              onClick={() => handleExamTypeChange("external")}
               className={`flex flex-col items-start p-4 rounded-xl border text-left transition ${
                 form.examType === "external"
-                  ? "border-indigo-600 bg-indigo-50/40 text-indigo-900"
+                  ? "border-indigo-600 bg-indigo-50/40 text-indigo-900 ring-2 ring-indigo-500/20"
                   : "border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
               }`}
             >
               <div className="flex items-center justify-between w-full">
-                <span className="font-bold text-sm">External Examination</span>
+                <span className="font-bold text-sm">External Exam</span>
                 <span
                   className={`h-2.5 w-2.5 rounded-full ${
                     form.examType === "external" ? "bg-indigo-600" : "bg-slate-300"
@@ -135,7 +157,29 @@ const CreateExam = () => {
                 />
               </div>
               <p className="text-xs text-slate-500 mt-1">
-                University end-semester practical exams and official assessments.
+                University end-semester practical coding exams.
+              </p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleExamTypeChange("viva")}
+              className={`flex flex-col items-start p-4 rounded-xl border text-left transition ${
+                form.examType === "viva"
+                  ? "border-indigo-600 bg-indigo-50/40 text-indigo-900 ring-2 ring-indigo-500/20"
+                  : "border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
+              }`}
+            >
+              <div className="flex items-center justify-between w-full">
+                <span className="font-bold text-sm">Viva Exam (MCQ)</span>
+                <span
+                  className={`h-2.5 w-2.5 rounded-full ${
+                    form.examType === "viva" ? "bg-indigo-600" : "bg-slate-300"
+                  }`}
+                />
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                AI-extracted MCQ questions with options &amp; instant grading.
               </p>
             </button>
           </div>
@@ -292,58 +336,165 @@ const CreateExam = () => {
           </div>
         </div>
 
-        {/* Grading & AI Conceptual Evaluation Rules */}
+        {/* Grading & Evaluation Rules */}
         <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs space-y-4">
           <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
             <Award size={18} className="text-indigo-600" />
             <h2 className="text-sm font-bold uppercase tracking-wider text-slate-800">
-              Scoring &amp; AI Conceptual Evaluation Rules
+              {form.examType === "viva" ? "Viva MCQ Scoring & Evaluation Rules" : "Scoring & AI Conceptual Evaluation Rules"}
             </h2>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
-                Total Marks
-              </label>
-              <input
-                type="number"
-                min="10"
-                max="500"
-                name="totalMarks"
-                value={form.totalMarks}
-                onChange={handleChange}
-                required
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-800 outline-none transition focus:border-indigo-500 focus:bg-white font-mono"
-              />
-            </div>
+          {form.examType === "viva" ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                    Total Marks
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="500"
+                    name="totalMarks"
+                    value={form.totalMarks}
+                    onChange={handleChange}
+                    required
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-800 outline-none transition focus:border-indigo-500 focus:bg-white font-mono"
+                  />
+                </div>
 
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
-                Max Conceptual Attempts Allowed
-              </label>
-              <input
-                type="number"
-                min="1"
-                max="10"
-                name="maxConceptualAttempts"
-                value={form.maxConceptualAttempts}
-                onChange={handleChange}
-                required
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-800 outline-none transition focus:border-indigo-500 focus:bg-white font-mono"
-              />
-              <p className="mt-1 text-[11px] text-slate-400">
-                Number of AI paper evaluation submissions permitted per student before requiring faculty override.
-              </p>
-            </div>
-          </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                    Marks Per Question
+                  </label>
+                  <input
+                    type="number"
+                    min="0.5"
+                    step="0.5"
+                    max="100"
+                    name="marksPerQuestion"
+                    value={form.marksPerQuestion}
+                    onChange={handleChange}
+                    required
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-800 outline-none transition focus:border-indigo-500 focus:bg-white font-mono"
+                  />
+                </div>
 
-          <div className="flex items-start gap-3 rounded-xl bg-slate-50 p-3.5 border border-slate-100 text-xs text-slate-600">
-            <ShieldAlert size={16} className="text-indigo-600 mt-0.5 flex-shrink-0" />
-            <span>
-              <strong>Automatic Code Unlock Rule:</strong> Students must score an AI conceptual error percentage strictly below 50% on their Paper Writing Notepad to unlock the Monaco C Code Editor.
-            </span>
-          </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                    Max Exam Attempts
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="5"
+                    name="maxAttempts"
+                    value={form.maxAttempts}
+                    onChange={handleChange}
+                    required
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-800 outline-none transition focus:border-indigo-500 focus:bg-white font-mono"
+                  />
+                </div>
+              </div>
+
+              {/* Negative Marking Configuration */}
+              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-sm font-bold text-slate-800">Enable Negative Marking</span>
+                    <p className="text-xs text-slate-500">
+                      Deduct marks for incorrect MCQ answers.
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      name="negativeMarkingEnabled"
+                      checked={form.negativeMarkingEnabled}
+                      onChange={handleChange}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                  </label>
+                </div>
+
+                {form.negativeMarkingEnabled && (
+                  <div className="pt-2 border-t border-slate-200/80">
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-1.5">
+                      Negative Marks Deducted Per Wrong Answer
+                    </label>
+                    <input
+                      type="number"
+                      step="0.05"
+                      min="0.05"
+                      max="10"
+                      name="negativeMarking"
+                      value={form.negativeMarking}
+                      onChange={handleChange}
+                      className="w-48 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-800 outline-none transition focus:border-indigo-500 font-mono"
+                    />
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      e.g., 0.25 (1/4th penalty) or 0.5 (half-mark deduction).
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-start gap-3 rounded-xl bg-indigo-50/60 p-3.5 border border-indigo-100 text-xs text-indigo-900">
+                <ShieldAlert size={16} className="text-indigo-600 mt-0.5 flex-shrink-0" />
+                <span>
+                  <strong>Automatic Evaluation:</strong> MCQs are evaluated instantly upon student submission or when the exam timer ends. Answer keys and explanations are stored securely and never leaked to candidates during the examination.
+                </span>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                    Total Marks
+                  </label>
+                  <input
+                    type="number"
+                    min="10"
+                    max="500"
+                    name="totalMarks"
+                    value={form.totalMarks}
+                    onChange={handleChange}
+                    required
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-800 outline-none transition focus:border-indigo-500 focus:bg-white font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                    Max Conceptual Attempts Allowed
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="10"
+                    name="maxConceptualAttempts"
+                    value={form.maxConceptualAttempts}
+                    onChange={handleChange}
+                    required
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-800 outline-none transition focus:border-indigo-500 focus:bg-white font-mono"
+                  />
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    Number of AI paper evaluation submissions permitted per student before requiring faculty override.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-start gap-3 rounded-xl bg-slate-50 p-3.5 border border-slate-100 text-xs text-slate-600">
+                <ShieldAlert size={16} className="text-indigo-600 mt-0.5 flex-shrink-0" />
+                <span>
+                  <strong>Automatic Code Unlock Rule:</strong> Students must score an AI conceptual error percentage strictly below 50% on their Paper Writing Notepad to unlock the Monaco C Code Editor.
+                </span>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Student Instructions */}

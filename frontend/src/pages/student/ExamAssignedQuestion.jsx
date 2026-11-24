@@ -1,49 +1,59 @@
 import { useEffect, useState } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import {
   HelpCircle,
   FileText,
   Clock,
   Award,
   ArrowRight,
+  ArrowLeft,
   ShieldCheck,
   CheckCircle2,
   Lock,
   AlertCircle,
   Code2,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { getMyAssignedQuestion } from "../../services/examService";
 import Loader from "../../components/common/Loader";
 
 const ExamAssignedQuestion = () => {
   const { examId } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
 
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
 
-  useEffect(() => {
-    const fetchQuestion = async () => {
-      try {
-        setLoading(true);
-        setErrorMsg("");
-        const res = await getMyAssignedQuestion(examId);
-        setData(res);
-      } catch (err) {
-        setErrorMsg(
-          err.response?.data?.message || "Failed to load assigned question."
-        );
-      } finally {
-        setLoading(false);
+  const currentQId = searchParams.get("questionId");
+
+  const fetchQuestion = async (qId) => {
+    try {
+      setLoading(true);
+      setErrorMsg("");
+      const params = qId ? { questionId: qId } : currentQId ? { questionId: currentQId } : {};
+      const res = await getMyAssignedQuestion(examId, params);
+      setData(res);
+      if (res.question?._id && res.question._id !== currentQId) {
+        setSearchParams({ questionId: res.question._id });
       }
-    };
+    } catch (err) {
+      setErrorMsg(
+        err.response?.data?.message || "Failed to load assigned question."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    fetchQuestion();
-  }, [examId]);
+  useEffect(() => {
+    fetchQuestion(currentQId);
+  }, [examId, currentQId]);
 
-  if (loading) {
-    return <Loader message="Loading your assigned question..." />;
+  if (loading && !data) {
+    return <Loader message="Loading your assigned examination question(s)..." />;
   }
 
   if (errorMsg || !data) {
@@ -62,18 +72,34 @@ const ExamAssignedQuestion = () => {
     );
   }
 
-  const { exam, question, progress } = data;
+  const { exam, question, progress, questions = [], currentIndex = 0 } = data;
   const isCompilerAllowed = progress?.compilerAllowed;
+
+  const handleSelectQuestion = (qId) => {
+    setSearchParams({ questionId: qId });
+  };
+
+  const handlePrevQuestion = () => {
+    if (currentIndex > 0 && questions[currentIndex - 1]) {
+      handleSelectQuestion(questions[currentIndex - 1]._id);
+    }
+  };
+
+  const handleNextQuestion = () => {
+    if (currentIndex < questions.length - 1 && questions[currentIndex + 1]) {
+      handleSelectQuestion(questions[currentIndex + 1]._id);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 py-8 px-4 sm:px-6 flex flex-col justify-between">
       <div className="max-w-4xl mx-auto w-full space-y-6">
-        {/* Top Bar */}
+        {/* Top Header Card */}
         <div className="bg-slate-800 border border-slate-700/80 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl">
           <div>
             <div className="flex items-center gap-2 mb-1">
               <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-indigo-500/10 border border-indigo-400/30 text-indigo-400">
-                Assigned Problem
+                Assigned Problem {questions.length > 1 ? `#${currentIndex + 1}` : ""}
               </span>
               <span
                 className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${
@@ -87,7 +113,12 @@ const ExamAssignedQuestion = () => {
                 {question.difficulty}
               </span>
             </div>
-            <h1 className="text-xl sm:text-2xl font-bold text-white">{question.title}</h1>
+            <h1 className="text-xl sm:text-2xl font-bold text-white">
+              <span className="font-mono text-indigo-400 mr-2">
+                {question.questionNumber ? `${question.questionNumber}:` : ""}
+              </span>
+              {question.title}
+            </h1>
             <p className="text-xs text-slate-400 mt-0.5">
               Exam: <span className="text-slate-300 font-medium">{exam.title}</span> ({exam.subject})
             </p>
@@ -108,6 +139,61 @@ const ExamAssignedQuestion = () => {
             )}
           </div>
         </div>
+
+        {/* Multi-Question Navigation Tabs (Visible when faculty assigned > 1 question) */}
+        {questions.length > 1 && (
+          <div className="bg-slate-800/90 border border-slate-700/80 rounded-2xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md">
+            <div className="flex items-center gap-2 overflow-x-auto py-1">
+              <span className="text-xs font-bold text-slate-400 px-2 uppercase tracking-wider whitespace-nowrap">
+                Questions ({questions.length}):
+              </span>
+              {questions.map((qItem, idx) => {
+                const isActive = qItem._id === question._id || currentIndex === idx;
+                return (
+                  <button
+                    key={qItem._id || idx}
+                    type="button"
+                    onClick={() => handleSelectQuestion(qItem._id)}
+                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 whitespace-nowrap ${
+                      isActive
+                        ? "bg-indigo-600 text-white shadow-md ring-2 ring-indigo-400/40"
+                        : "bg-slate-700/60 text-slate-300 hover:bg-slate-700 hover:text-white"
+                    }`}
+                  >
+                    <span>{qItem.questionNumber || `Q${idx + 1}`}</span>
+                    {qItem.isCompleted ? (
+                      <span className="text-emerald-400 font-bold">✓</span>
+                    ) : qItem.compilerAllowed ? (
+                      <span className="text-indigo-300 text-[10px]">●</span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-between sm:justify-end gap-2 text-xs text-slate-400">
+              <button
+                type="button"
+                onClick={handlePrevQuestion}
+                disabled={currentIndex === 0}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-700/50 hover:bg-slate-700 text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed transition"
+              >
+                <ChevronLeft size={14} /> Prev
+              </button>
+              <span className="px-1 font-medium">
+                {currentIndex + 1} / {questions.length}
+              </span>
+              <button
+                type="button"
+                onClick={handleNextQuestion}
+                disabled={currentIndex === questions.length - 1}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-700/50 hover:bg-slate-700 text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed transition"
+              >
+                Next <ChevronRight size={14} />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Problem Statement Card */}
         <div className="bg-slate-800 border border-slate-700/80 rounded-2xl p-6 space-y-5 shadow-xl">
@@ -149,43 +235,15 @@ const ExamAssignedQuestion = () => {
             </div>
           )}
 
-          {/* Structured Matrix Grid if present */}
-          {question.matrixData?.values && Array.isArray(question.matrixData.values) && (
-            <div className="space-y-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-indigo-400">
-                Matrix Grid ({question.matrixData.rows} × {question.matrixData.columns})
-              </span>
-              <div className="overflow-x-auto p-3 bg-slate-950 rounded-xl border border-indigo-900/40 inline-block">
-                <table className="border-collapse font-mono text-xs text-center">
-                  <tbody>
-                    {question.matrixData.values.map((row, rIdx) => (
-                      <tr key={rIdx} className="border-b border-slate-800 last:border-b-0">
-                        {Array.isArray(row) &&
-                          row.map((cell, cIdx) => (
-                            <td
-                              key={cIdx}
-                              className="px-3.5 py-1.5 text-indigo-300 font-bold border-r border-slate-800 last:border-r-0"
-                            >
-                              {cell}
-                            </td>
-                          ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {/* Sample Test Cases (Visible) */}
+          {/* Visible Sample Test Cases */}
           {question.sampleTestCases && question.sampleTestCases.length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                  Visible Sample Test Cases
-                </h2>
-                <span className="text-[11px] text-slate-500">
-                  Hidden test cases are protected and evaluated upon submission
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                  Sample Test Cases ({question.sampleTestCases.length})
+                </h3>
+                <span className="text-[10px] text-slate-500">
+                  Evaluated in Code Editor mode
                 </span>
               </div>
 
@@ -225,7 +283,7 @@ const ExamAssignedQuestion = () => {
             </h3>
             <p className="text-xs text-indigo-200/80">
               Your paper answer will be evaluated against: Logic &amp; Correctness (30%), Algorithmic Approach (25%), Syntax &amp; Structure (20%), Code Efficiency (15%), and Constraints (10%).
-              You must achieve an error rate <strong className="text-white">below 50%</strong> to unlock the code compiler.
+              You must achieve an error rate <strong className="text-white">below 50%</strong> to unlock the code compiler for this question.
             </p>
           </div>
         </div>
@@ -242,7 +300,7 @@ const ExamAssignedQuestion = () => {
           <div className="flex items-center gap-3 w-full sm:w-auto">
             {isCompilerAllowed && (
               <button
-                onClick={() => navigate(`/exams/${examId}/editor`)}
+                onClick={() => navigate(`/exams/${examId}/editor?questionId=${question._id}`)}
                 className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-6 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl text-sm font-bold shadow-md transition"
               >
                 <Code2 className="w-4 h-4 text-emerald-400" />
@@ -251,7 +309,7 @@ const ExamAssignedQuestion = () => {
             )}
 
             <button
-              onClick={() => navigate(`/exams/${examId}/paper`)}
+              onClick={() => navigate(`/exams/${examId}/paper?questionId=${question._id}`)}
               className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-600/30 transition transform active:scale-95"
             >
               <FileText className="w-4 h-4" />

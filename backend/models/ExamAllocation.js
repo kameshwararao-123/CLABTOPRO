@@ -14,12 +14,20 @@ const examAllocationSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    // Maintained for backward compatibility with 1-to-1 callers (set to assignedQuestionIds[0])
     questionId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "ExamQuestion",
-      required: true,
       index: true,
     },
+    // Array of unique question IDs allocated to this student for the exam
+    assignedQuestionIds: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "ExamQuestion",
+        required: true,
+      },
+    ],
     allocatedAt: {
       type: Date,
       default: Date.now,
@@ -31,10 +39,11 @@ const examAllocationSchema = new mongoose.Schema(
 );
 
 // Enforce database-level uniqueness:
-// 1. A student receives at most one question per exam
+// Each student receives exactly ONE allocation record per exam containing their assignedQuestionIds
 examAllocationSchema.index({ examId: 1, studentId: 1 }, { unique: true });
-// 2. A question is assigned to at most one student per exam
-examAllocationSchema.index({ examId: 1, questionId: 1 }, { unique: true });
+// Index for querying allocations by questionId (non-unique, since questions can be shared across multiple students)
+examAllocationSchema.index({ examId: 1, questionId: 1 });
+examAllocationSchema.index({ examId: 1, assignedQuestionIds: 1 });
 
 const ExamAllocation = mongoose.model("ExamAllocation", examAllocationSchema);
 export default ExamAllocation;
