@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from "react";
+import { PHASE3_SECURITY_ENABLED } from "../configs/securityConfig";
 
 const RestrictionContext = createContext(null);
 
@@ -44,6 +45,11 @@ export const RestrictionProvider = ({ children }) => {
   };
 
   useEffect(() => {
+    // If Phase 3 security is disabled, do not attach global restriction listeners
+    if (!PHASE3_SECURITY_ENABLED) {
+      return;
+    }
+
     // 1. Detect Browser Tab Switch or Window Minimize
     const handleVisibilityChange = () => {
       if (document.hidden) {

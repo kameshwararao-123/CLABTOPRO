@@ -10,9 +10,14 @@ const rubricCriterionSchema = new mongoose.Schema(
     weight: {
       type: Number,
       required: true,
-      min: 1,
+      min: 0,
       max: 100,
       default: 25,
+    },
+    maxMarks: {
+      type: Number,
+      min: 0,
+      default: null,
     },
     description: {
       type: String,
@@ -159,6 +164,18 @@ const examQuestionSchema = new mongoose.Schema(
       default: "",
     },
     explanation: {
+      type: String,
+      default: "",
+    },
+    expectedAnswer: {
+      type: String,
+      default: "",
+    },
+    keyConcepts: {
+      type: [String],
+      default: [],
+    },
+    evaluationInstructions: {
       type: String,
       default: "",
     },

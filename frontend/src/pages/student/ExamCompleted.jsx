@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import {
   CheckCircle2,
   AlertTriangle,
@@ -12,45 +12,205 @@ import {
   Clock,
   RotateCcw,
 } from "lucide-react";
-import { getStudentExamCompletion } from "../../services/examService";
+import { getStudentExamCompletion, endStudentExam } from "../../services/examService";
 import Loader from "../../components/common/Loader";
+import useVisibilityPolling from "../../hooks/useVisibilityPolling";
 
 const ExamCompleted = () => {
   const { examId } = useParams();
+  const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [finishing, setFinishing] = useState(false);
+  const [finishError, setFinishError] = useState("");
+
+  const fetchCompletion = async (silent = false) => {
+    try {
+      if (!silent) {
+        setLoading(true);
+        setLoadError("");
+      }
+      const res = await getStudentExamCompletion(examId);
+      setData(res);
+    } catch (err) {
+      console.error("Failed to load completion details:", err);
+      if (!silent) {
+        setLoadError(
+          err.response?.data?.message ||
+            "Unable to load examination completion summary. Please retry."
+        );
+      }
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const fetchCompletion = async () => {
-      try {
-        setLoading(true);
-        const res = await getStudentExamCompletion(examId);
-        setData(res);
-      } catch (err) {
-        console.error("Failed to load completion details:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchCompletion();
+    fetchCompletion(false);
   }, [examId]);
+
+  // Visibility-aware poll while on an intermediate screen so faculty End Exam or timer expiry transitions
+  const shouldPollIntermediate =
+    Boolean(data) &&
+    !data.isSuccessfullyCompleted &&
+    Boolean(data.hasRemainingQuestions || data.readyToFinish);
+  useVisibilityPolling(() => fetchCompletion(true), 12000, shouldPollIntermediate);
 
   if (loading) {
     return <Loader message="Validating examination completion status..." />;
   }
 
+  if (loadError && !data) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center py-12 px-4 sm:px-6">
+        <div className="max-w-md w-full bg-slate-900 border border-rose-800/60 rounded-3xl p-8 text-center space-y-5 shadow-2xl">
+          <div className="w-16 h-16 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 flex items-center justify-center mx-auto">
+            <AlertTriangle className="w-8 h-8" />
+          </div>
+          <h1 className="text-xl font-bold text-white">Failed to Load Completion Report</h1>
+          <p className="text-sm text-rose-300">{loadError}</p>
+          <button
+            type="button"
+            onClick={() => fetchCompletion(false)}
+            className="inline-flex items-center justify-center gap-2 px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold transition"
+          >
+            <RotateCcw className="w-4 h-4" />
+            <span>Retry</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const isCompleted = Boolean(data?.isSuccessfullyCompleted);
+  const isFacultyEnded = data?.completionReason === "faculty_ended" || Boolean(data?.facultyEndedExam);
+  const isTimeExpired = data?.completionReason === "time_expired" || Boolean(data?.timeExpired);
   const exam = data?.exam;
-  const progress = data?.progress;
-  const submission = data?.submission;
+  const assignedCount = data?.assignedQuestionCount ?? 1;
+  const submittedCount = data?.submittedQuestionCount ?? (isCompleted ? assignedCount : 0);
+  const remainingCount = data?.remainingQuestionCount ?? Math.max(0, assignedCount - submittedCount);
+  const hasRemainingQuestions = Boolean(data?.hasRemainingQuestions) && !isCompleted && !isFacultyEnded && !isTimeExpired && remainingCount > 0;
+  const readyToFinish = Boolean(data?.readyToFinish) && !isCompleted && !isFacultyEnded && !isTimeExpired;
+  const nextQuestion = data?.nextQuestion || null;
+
+  const handleFinishExam = async () => {
+    try {
+      setFinishing(true);
+      setFinishError("");
+      await endStudentExam(examId);
+      await fetchCompletion(false);
+    } catch (err) {
+      setFinishError(err.response?.data?.message || "Failed to finish examination. Please try again.");
+    } finally {
+      setFinishing(false);
+    }
+  };
+
+  // Intermediate Screen 2: All Assigned Questions Submitted -> Show Finish Exam button
+  if (readyToFinish) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center py-12 px-4 sm:px-6">
+        <div className="max-w-lg w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 sm:p-10 shadow-2xl text-center space-y-6 animate-fade-in">
+          <div className="w-20 h-20 rounded-full bg-emerald-500/10 border-2 border-emerald-500/30 text-emerald-400 flex items-center justify-center mx-auto shadow-lg shadow-emerald-500/10">
+            <CheckCircle2 className="w-10 h-10" />
+          </div>
+
+          <div className="space-y-2">
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+              All Questions Submitted Successfully!
+            </h1>
+            <p className="text-base font-bold text-emerald-400">
+              Questions Submitted: {submittedCount} of {assignedCount}
+            </p>
+          </div>
+
+          {finishError && (
+            <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-800 text-rose-300 text-xs">
+              {finishError}
+            </div>
+          )}
+
+          <button
+            type="button"
+            disabled={finishing}
+            onClick={handleFinishExam}
+            className="w-full inline-flex items-center justify-center gap-2 px-8 py-3.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-600/30 transition transform active:scale-95 disabled:opacity-50"
+          >
+            <span>{finishing ? "Finalizing Examination..." : "Finish Exam"}</span>
+            <ArrowRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Intermediate Question Submitted Success Screen (only when more assigned questions remain & faculty hasn't ended exam)
+  if (hasRemainingQuestions && submittedCount > 0) {
+    const handleNextQuestion = () => {
+      if (!nextQuestion?._id) {
+        navigate(`/exams/${examId}/paper`, { replace: true });
+        return;
+      }
+      if (nextQuestion.compilerAllowed) {
+        navigate(`/exams/${examId}/editor?questionId=${nextQuestion._id}`, { replace: true });
+      } else {
+        navigate(`/exams/${examId}/paper?questionId=${nextQuestion._id}`, { replace: true });
+      }
+    };
+
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center py-12 px-4 sm:px-6">
+        <div className="max-w-lg w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 sm:p-10 shadow-2xl text-center space-y-6 animate-fade-in">
+          <div className="w-20 h-20 rounded-full bg-emerald-500/10 border-2 border-emerald-500/30 text-emerald-400 flex items-center justify-center mx-auto shadow-lg shadow-emerald-500/10">
+            <CheckCircle2 className="w-10 h-10" />
+          </div>
+
+          <div className="space-y-2">
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+              Question Submitted Successfully!
+            </h1>
+            <p className="text-base font-bold text-emerald-400">
+              {submittedCount} of {assignedCount} Questions Submitted Successfully
+            </p>
+          </div>
+
+          <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-5 space-y-1.5 text-sm text-slate-300">
+            <p>
+              You have successfully submitted{" "}
+              <strong className="text-white">{submittedCount}</strong>{" "}
+              {submittedCount === 1 ? "question" : "questions"}.
+            </p>
+            <p className="text-amber-300 font-semibold">
+              {remainingCount} {remainingCount === 1 ? "question" : "questions"} remaining.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleNextQuestion}
+            className="w-full inline-flex items-center justify-center gap-2 px-8 py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-emerald-600/30 transition transform active:scale-95"
+          >
+            <span>Next Question</span>
+            <ArrowRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center py-12 px-4 sm:px-6">
       <div className="max-w-2xl w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 sm:p-12 shadow-2xl text-center space-y-8 animate-fade-in">
         {/* Header Icon */}
         {isCompleted ? (
-          <div className="w-20 h-20 rounded-full bg-emerald-500/10 border-2 border-emerald-500/30 text-emerald-400 flex items-center justify-center mx-auto shadow-lg shadow-emerald-500/10">
+          <div
+            className={`w-20 h-20 rounded-full flex items-center justify-center mx-auto shadow-lg ${
+              isFacultyEnded
+                ? "bg-indigo-500/10 border-2 border-indigo-500/30 text-indigo-400 shadow-indigo-500/10"
+                : "bg-emerald-500/10 border-2 border-emerald-500/30 text-emerald-400 shadow-emerald-500/10"
+            }`}
+          >
             <CheckCircle2 className="w-10 h-10" />
           </div>
         ) : (
@@ -63,15 +223,33 @@ const ExamCompleted = () => {
         <div className="space-y-2">
           {isCompleted ? (
             <>
-              <span className="text-xs font-bold uppercase tracking-widest text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-full">
-                Examination Complete
+              <span
+                className={`text-xs font-bold uppercase tracking-widest px-3 py-1 rounded-full border ${
+                  isFacultyEnded
+                    ? "text-indigo-300 bg-indigo-500/10 border-indigo-500/20"
+                    : isTimeExpired
+                    ? "text-amber-300 bg-amber-500/10 border-amber-500/20"
+                    : "text-emerald-400 bg-emerald-500/10 border-emerald-500/20"
+                }`}
+              >
+                {isFacultyEnded
+                  ? "Examination Ended by Faculty"
+                  : isTimeExpired
+                  ? "Exam Timer Expired"
+                  : "Examination Completed"}
               </span>
               <h1 className="text-3xl font-extrabold text-white tracking-tight">
-                Exam Completed Successfully!
+                {isFacultyEnded
+                  ? "Examination Ended by Faculty"
+                  : isTimeExpired
+                  ? "Examination Time Expired"
+                  : "Exam Completed Successfully!"}
               </h1>
               <p className="text-sm text-slate-400 max-w-md mx-auto">
                 {data?.message ||
-                  "You have successfully completed and submitted your examination. All responses have been logged in the audit registry."}
+                  (isFacultyEnded
+                    ? `The faculty has ended the examination. You submitted ${submittedCount} out of ${assignedCount} assigned question(s).`
+                    : "Congratulations! You have successfully completed all assigned questions.")}
               </p>
             </>
           ) : (
@@ -152,16 +330,16 @@ const ExamCompleted = () => {
             </div>
 
             <div className="space-y-1">
-              <span className="text-slate-400">Conceptual Notepad Status:</span>
+              <span className="text-slate-400">AI Evaluation Status:</span>
               <div
                 className={`flex items-center gap-1.5 font-bold ${
-                  data?.conceptualAnswerStatus?.includes("Passed")
+                  (data?.aiEvaluationStatus || data?.conceptualAnswerStatus)?.includes("Passed")
                     ? "text-emerald-400"
                     : "text-amber-400"
                 }`}
               >
                 <ShieldCheck className="w-4 h-4 shrink-0" />
-                <span>{data?.conceptualAnswerStatus || "Not Completed / Pending"}</span>
+                <span>{data?.aiEvaluationStatus || data?.conceptualAnswerStatus || "Not Completed / Pending"}</span>
               </div>
             </div>
 
@@ -200,13 +378,46 @@ const ExamCompleted = () => {
             </div>
 
             <div className="space-y-1">
-              <span className="text-slate-400">Submission Timestamp:</span>
+              <span className="text-slate-400">Completion Reason:</span>
+              <div className="font-semibold text-slate-200">
+                {isFacultyEnded
+                  ? "Examination ended by faculty"
+                  : isTimeExpired
+                  ? "Exam timer expired"
+                  : isCompleted
+                  ? "All assigned questions submitted"
+                  : "In Progress / Pending"}
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <span className="text-slate-400">Questions Progress:</span>
+              <div className="font-mono font-bold text-slate-200">
+                <span className="text-indigo-300">{data?.questionsAttempted ?? submittedCount} Attempted</span>
+                <span className="text-slate-500"> / </span>
+                <span className="text-emerald-400">{submittedCount} Completed</span>
+                <span className="text-slate-500"> / </span>
+                <span>{assignedCount} Total</span>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <span className="text-slate-400">Completion / End Timestamp:</span>
               <div className="text-slate-300 font-mono">
-                {data?.submissionTime
-                  ? new Date(data.submissionTime).toLocaleString()
+                {data?.completedAt || data?.submissionTime
+                  ? new Date(data.completedAt || data.submissionTime).toLocaleString()
                   : "Not Submitted"}
               </div>
             </div>
+
+            {data?.marks !== null && data?.marks !== undefined && (
+              <div className="space-y-1">
+                <span className="text-slate-400">Score / Marks:</span>
+                <div className="text-emerald-400 font-mono font-bold">
+                  {data.marks} / {data.totalMarks ?? exam?.totalMarks ?? 100}
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

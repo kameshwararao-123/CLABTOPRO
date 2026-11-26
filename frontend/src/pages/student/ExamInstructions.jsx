@@ -17,6 +17,7 @@ import {
   acknowledgeInstructions,
 } from "../../services/examService";
 import Loader from "../../components/common/Loader";
+import { isExamProgressCompleted } from "../../utils/examStatus";
 
 const ExamInstructions = () => {
   const { examId } = useParams();
@@ -38,10 +39,19 @@ const ExamInstructions = () => {
         setExam(data.exam);
         setProgress(data.progress);
 
+        if (isExamProgressCompleted(data.progress, data)) {
+          navigate(`/exams/${examId}/completed`, { replace: true });
+          return;
+        }
+
         if (data.progress?.instructionsAcknowledged) {
           navigate(`/exams/${examId}/question`, { replace: true });
         }
       } catch (err) {
+        if (err.response?.data?.isCompleted) {
+          navigate(`/exams/${examId}/completed`, { replace: true });
+          return;
+        }
         setErrorMsg(
           err.response?.data?.message || "Failed to load examination instructions."
         );
@@ -157,7 +167,7 @@ const ExamInstructions = () => {
                 3
               </span>
               <p>
-                <strong>50% Error Threshold Compiler Gate:</strong> The AI system evaluates your conceptual answer against the faculty rubric. The C Code Compiler will remain <span className="text-rose-400 font-bold">LOCKED</span> until your conceptual error score is strictly below 50%. You have up to {exam?.maxConceptualAttempts || 3} evaluation attempts.
+                <strong>50% Error Threshold Compiler Gate:</strong> The AI system evaluates your conceptual answer against the faculty rubric. The C Code Compiler will remain <span className="text-rose-400 font-bold">LOCKED</span> until your conceptual error score is strictly below 50%. You can revise and resubmit your conceptual answer whenever returned by faculty.
               </p>
             </div>
 

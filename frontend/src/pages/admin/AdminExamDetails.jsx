@@ -44,10 +44,12 @@ import {
   facultyAuthorizeCompiler,
   facultyReturnToNotepad,
   getStudentConceptualReport,
+  getFacultyStudentCompletion,
 } from "../../services/examService";
 import Loader from "../../components/common/Loader";
 import ExamQuestionUploadModal from "../../components/exam/ExamQuestionUploadModal";
 import ExamQuestionPreviewModal from "../../components/exam/ExamQuestionPreviewModal";
+import useVisibilityPolling from "../../hooks/useVisibilityPolling";
 
 const AdminExamDetails = () => {
   const { examId } = useParams();
@@ -68,6 +70,9 @@ const AdminExamDetails = () => {
   const [monitoringData, setMonitoringData] = useState(null);
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
   const [monitoringSearch, setMonitoringSearch] = useState("");
+  const [monitoringStatusFilter, setMonitoringStatusFilter] = useState("all");
+  const [monitoringPage, setMonitoringPage] = useState(1);
+  const MONITORING_PAGE_SIZE = 25;
   const [actionLoading, setActionLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
@@ -92,6 +97,10 @@ const AdminExamDetails = () => {
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false);
   const [activeExtractionJobId, setActiveExtractionJobId] = useState(null);
+  const [completionModalOpen, setCompletionModalOpen] = useState(false);
+  const [completionLoading, setCompletionLoading] = useState(false);
+  const [completionError, setCompletionError] = useState("");
+  const [completionData, setCompletionData] = useState(null);
   const [newQuestion, setNewQuestion] = useState({
     title: "",
     problemStatement: "",
@@ -117,6 +126,23 @@ const AdminExamDetails = () => {
   const handleTabChange = (tabKey) => {
     setActiveTab(tabKey);
     setSearchParams({ tab: tabKey });
+  };
+
+  const handleOpenCompletionModal = async (targetStudentId) => {
+    setCompletionModalOpen(true);
+    setCompletionLoading(true);
+    setCompletionError("");
+    setCompletionData(null);
+    try {
+      const res = await getFacultyStudentCompletion(examId, targetStudentId);
+      setCompletionData(res);
+    } catch (err) {
+      setCompletionError(
+        err.response?.data?.message || "Failed to load student completion details."
+      );
+    } finally {
+      setCompletionLoading(false);
+    }
   };
 
   const fetchExamDetails = async () => {
@@ -189,13 +215,11 @@ const AdminExamDetails = () => {
     }
   }, [activeTab]);
 
-  useEffect(() => {
-    if (activeTab !== "monitoring" || !autoRefreshEnabled) return;
-    const interval = setInterval(() => {
-      fetchMonitoring();
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [activeTab, autoRefreshEnabled, examId]);
+  useVisibilityPolling(
+    fetchMonitoring,
+    12000,
+    activeTab === "monitoring" && autoRefreshEnabled
+  );
 
   const handleStartExam = async () => {
     const k = parseInt(questionsPerStudentInput, 10);
@@ -303,20 +327,34 @@ const AdminExamDetails = () => {
       const err = aiEval.errorPercentage ?? studentRow.lastConceptualError ?? 0;
       const und = aiEval.understandingPercentage ?? Math.max(0, 100 - err);
 
+      const targetQ = res.question || latestSub?.questionId;
+      const totalMarks = res.totalMarks || targetQ?.marks || 10;
+      const marksObtained = res.marksObtained !== undefined && res.marksObtained !== null
+        ? res.marksObtained
+        : Math.round((und / 100) * totalMarks * 10) / 10;
+
       setConceptualReportModal({
         studentId: studentRow.studentId,
         studentName: studentRow.username,
         rollNo: studentRow.rollNo,
+        submissionId: latestSub?._id,
         questionId: studentRow.targetQuestionId,
-        questionTitle: latestSub?.questionId?.title || studentRow.assignedQuestion,
+        questionNumber: targetQ?.questionNumber || "Q1",
+        questionTitle: targetQ?.title || studentRow.assignedQuestion,
+        problemStatement: targetQ?.problemStatement || "",
+        evaluationRubric: targetQ?.evaluationRubric || [],
+        totalMarks,
+        marksObtained,
         conceptualAnswer: latestSub?.answerText || studentRow.lastConceptualAnswer,
         understandingPercentage: und,
         errorPercentage: err,
-        correctConcepts: aiEval.strengths || aiEval.correctConcepts || [],
+        criteriaEvaluation: aiEval.criteriaEvaluation || [],
+        rubricWarnings: aiEval.rubricWarnings || [],
+        correctConcepts: aiEval.correctConcepts || aiEval.strengths || [],
         missingConcepts: aiEval.missingConcepts || [],
-        incorrectConcepts: (aiEval.identifiedIssues || []).map((i) => `${i.criterion}: ${i.description}`),
-        suggestions: (aiEval.identifiedIssues || []).map((i) => i.hint).filter(Boolean),
-        feedbackSummary: aiEval.feedbackSummary || "",
+        incorrectConcepts: aiEval.incorrectConcepts || (aiEval.identifiedIssues || []).map((i) => `${i.criterion}: ${i.description}`),
+        suggestions: aiEval.improvementSuggestions || aiEval.suggestions || (aiEval.identifiedIssues || []).map((i) => i.hint).filter(Boolean),
+        feedbackSummary: aiEval.overallFeedback || aiEval.feedbackSummary || "",
         canAllowToCode: err < 50,
         requiresRevision: err >= 50,
         attemptNumber: latestSub?.attemptNumber || studentRow.conceptualAttemptsCount || 1,
@@ -1335,27 +1373,51 @@ const AdminExamDetails = () => {
             </div>
           </div>
 
-          {/* Search Bar */}
-          <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs">
-            <div className="relative flex-1 max-w-md">
+          {/* Search & Status Filter Bar */}
+          <div className="flex flex-wrap items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs">
+            <div className="relative flex-1 min-w-[220px] max-w-md">
               <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 type="text"
                 placeholder="Search candidates by name or roll number..."
                 value={monitoringSearch}
-                onChange={(e) => setMonitoringSearch(e.target.value)}
+                onChange={(e) => {
+                  setMonitoringSearch(e.target.value);
+                  setMonitoringPage(1);
+                }}
                 className="w-full pl-9 pr-3.5 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50/60 focus:bg-white focus:border-indigo-500 focus:outline-hidden transition"
               />
               {monitoringSearch && (
                 <button
                   type="button"
-                  onClick={() => setMonitoringSearch("")}
+                  onClick={() => {
+                    setMonitoringSearch("");
+                    setMonitoringPage(1);
+                  }}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-600"
                 >
                   ✕
                 </button>
               )}
             </div>
+            <select
+              value={monitoringStatusFilter}
+              onChange={(e) => {
+                setMonitoringStatusFilter(e.target.value);
+                setMonitoringPage(1);
+              }}
+              className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 bg-slate-50/60 text-slate-700 focus:bg-white focus:border-indigo-500 focus:outline-hidden"
+            >
+              <option value="all">All Exam Statuses</option>
+              <option value="Successfully Completed">Successfully Completed</option>
+              <option value="Coding In Progress">Coding In Progress</option>
+              <option value="Waiting for Faculty Evaluation">Waiting for Faculty Evaluation</option>
+              <option value="Waiting for Faculty Decision">Waiting for Faculty Decision</option>
+              <option value="Notepad Pending">Notepad Pending</option>
+              <option value="Test Cases Failed">Test Cases Failed</option>
+              <option value="Time Expired">Time Expired</option>
+              <option value="Not Started">Not Started</option>
+            </select>
           </div>
 
           {!monitoringData ? (
@@ -1376,13 +1438,16 @@ const AdminExamDetails = () => {
                       <th className="px-5 py-3.5 text-center">AI Evaluation</th>
                       <th className="px-5 py-3.5 text-center">Evaluation Action</th>
                       <th className="px-5 py-3.5 text-center">Compiler</th>
-                      <th className="px-5 py-3.5 text-center">Test Cases</th>
+                      <th className="px-5 py-3.5 text-center">Solved Questions</th>
                       <th className="px-5 py-3.5 text-center">Exam Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-700">
                     {(monitoringData.students || [])
                       .filter((s) => {
+                        if (monitoringStatusFilter !== "all" && s.examStatus !== monitoringStatusFilter) {
+                          return false;
+                        }
                         if (!monitoringSearch.trim()) return true;
                         const q = monitoringSearch.trim().toLowerCase();
                         return (
@@ -1391,8 +1456,12 @@ const AdminExamDetails = () => {
                           s.email?.toLowerCase().includes(q)
                         );
                       })
+                      .slice(
+                        (monitoringPage - 1) * MONITORING_PAGE_SIZE,
+                        monitoringPage * MONITORING_PAGE_SIZE
+                      )
                       .map((row) => (
-                        <tr key={row.studentId} className="transition hover:bg-slate-50/60">
+                        <tr key={row.rowId || `${row.studentId}_${row.targetQuestionId || ""}`} className="transition hover:bg-slate-50/60">
                           {/* 1. Roll No */}
                           <td className="px-5 py-3.5 font-semibold text-slate-900 font-mono text-xs">
                             {row.rollNo || "—"}
@@ -1405,8 +1474,17 @@ const AdminExamDetails = () => {
                           </td>
 
                           {/* 3. Assigned Problem */}
-                          <td className="px-5 py-3.5 text-xs text-slate-600 max-w-[180px] truncate" title={row.assignedQuestion}>
-                            {row.assignedQuestion || "Not Assigned"}
+                          <td className="px-5 py-3.5 text-xs text-slate-600 max-w-[200px]" title={row.assignedQuestion}>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {row.questionNumber && (
+                                <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 font-bold text-[10px]">
+                                  {row.questionNumber}
+                                </span>
+                              )}
+                              <span className="truncate font-medium text-slate-800">
+                                {row.questionTitle || row.assignedQuestion || "Not Assigned"}
+                              </span>
+                            </div>
                           </td>
 
                           {/* 4. Notepad Status */}
@@ -1536,21 +1614,26 @@ const AdminExamDetails = () => {
                             )}
                           </td>
 
-                          {/* 8. Test Cases */}
+                          {/* 8. Solved Questions */}
                           <td className="px-5 py-3.5 text-center">
-                            {row.totalTestCases > 0 ? (
-                              <span
-                                className={`text-xs font-bold ${
-                                  row.testCasesPassed === row.totalTestCases
-                                    ? "text-emerald-600"
-                                    : "text-amber-600"
-                                }`}
-                              >
-                                {row.testCasesPassed} / {row.totalTestCases} Passed
-                              </span>
-                            ) : (
-                              <span className="text-xs text-slate-400 font-medium">—</span>
-                            )}
+                            {(() => {
+                              const solved = row.solvedQuestionsCount ?? 0;
+                              const total = row.totalAssignedQuestions || 1;
+                              const isAllSolved = total > 0 && solved >= total;
+                              return (
+                                <span
+                                  className={`inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-mono font-bold border ${
+                                    isAllSolved
+                                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                      : solved > 0
+                                      ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                      : "bg-slate-100 text-slate-600 border-slate-200"
+                                  }`}
+                                >
+                                  {row.solvedQuestionsLabel || `${solved}/${total}`}
+                                </span>
+                              );
+                            })()}
                           </td>
 
                           {/* 9. Exam Status */}
@@ -1576,12 +1659,62 @@ const AdminExamDetails = () => {
                             >
                               {row.examStatus || "Not Started"}
                             </span>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenCompletionModal(row.studentId)}
+                              className="ml-2 inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-[11px] font-semibold transition"
+                              title="View student completion summary"
+                            >
+                              <Eye size={12} />
+                              Details
+                            </button>
                           </td>
                         </tr>
                       ))}
                   </tbody>
                 </table>
               </div>
+              {(() => {
+                const totalFiltered = (monitoringData.students || []).filter((s) => {
+                  if (monitoringStatusFilter !== "all" && s.examStatus !== monitoringStatusFilter) {
+                    return false;
+                  }
+                  if (!monitoringSearch.trim()) return true;
+                  const q = monitoringSearch.trim().toLowerCase();
+                  return (
+                    s.rollNo?.toLowerCase().includes(q) ||
+                    s.username?.toLowerCase().includes(q) ||
+                    s.email?.toLowerCase().includes(q)
+                  );
+                }).length;
+                const totalPages = Math.max(1, Math.ceil(totalFiltered / MONITORING_PAGE_SIZE));
+                if (totalFiltered <= MONITORING_PAGE_SIZE) return null;
+                return (
+                  <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100 bg-slate-50/50 text-xs text-slate-600">
+                    <span>
+                      Page <strong>{monitoringPage}</strong> of <strong>{totalPages}</strong> ({totalFiltered} rows)
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={monitoringPage <= 1}
+                        onClick={() => setMonitoringPage((p) => Math.max(1, p - 1))}
+                        className="px-3 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 font-semibold disabled:opacity-40"
+                      >
+                        Prev
+                      </button>
+                      <button
+                        type="button"
+                        disabled={monitoringPage >= totalPages}
+                        onClick={() => setMonitoringPage((p) => Math.min(totalPages, p + 1))}
+                        className="px-3 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 font-semibold disabled:opacity-40"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>
@@ -1620,13 +1753,37 @@ const AdminExamDetails = () => {
 
             {/* Modal Body */}
             <div className="overflow-y-auto flex-1 pr-1 py-4 space-y-5">
-              {/* Metric Cards */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
-                  <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">
-                    Understanding Percentage
+              {/* Question Specs Banner */}
+              {conceptualReportModal.problemStatement && (
+                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                  <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                    Problem Statement &amp; Criteria:
                   </span>
-                  <span className="text-2xl font-black text-indigo-600 font-mono">
+                  <p className="text-xs text-slate-700 whitespace-pre-wrap leading-relaxed">
+                    {conceptualReportModal.problemStatement}
+                  </p>
+                </div>
+              )}
+
+              {/* Metric Cards */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="p-3.5 rounded-xl bg-indigo-50/70 border border-indigo-200">
+                  <span className="text-[11px] font-semibold text-indigo-700 uppercase tracking-wider block">
+                    Marks Awarded
+                  </span>
+                  <span className="text-2xl font-black text-indigo-700 font-mono">
+                    {conceptualReportModal.marksObtained !== undefined && conceptualReportModal.marksObtained !== null
+                      ? conceptualReportModal.marksObtained
+                      : Math.round(((conceptualReportModal.understandingPercentage || 0) / 100) * (conceptualReportModal.totalMarks || 10) * 10) / 10}
+                    <span className="text-sm font-normal text-slate-500"> / {conceptualReportModal.totalMarks || 10}</span>
+                  </span>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                  <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
+                    Correctness Percentage
+                  </span>
+                  <span className="text-2xl font-black text-slate-800 font-mono">
                     {conceptualReportModal.understandingPercentage}%
                   </span>
                 </div>
@@ -1638,36 +1795,129 @@ const AdminExamDetails = () => {
                       : "bg-rose-50/70 border-rose-200 text-rose-900"
                   }`}
                 >
-                  <span className="text-xs font-semibold uppercase tracking-wider block">
-                    Error Percentage (Threshold: &lt;50%)
+                  <span className="text-[11px] font-semibold uppercase tracking-wider block">
+                    Error Rate (&lt;50% Pass)
                   </span>
                   <span className="text-2xl font-black font-mono">
                     {conceptualReportModal.errorPercentage}%
                   </span>
-                  <span className="text-[11px] block mt-0.5 font-medium">
+                  <span className="text-[10px] block mt-0.5 font-bold">
                     {conceptualReportModal.errorPercentage < 50
-                      ? "✓ Meets conceptual passing threshold"
-                      : "✗ Revision required (>= 50% error)"}
+                      ? "✓ PASSED (Threshold met)"
+                      : "✗ REVISION REQUIRED (>= 50%)"}
                   </span>
                 </div>
               </div>
 
               {/* Conceptual Answer Text */}
               <div className="space-y-1.5">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">
-                  Submitted Conceptual Answer:
-                </span>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">
+                    Submitted Conceptual Answer (Attempt #{conceptualReportModal.attemptNumber}):
+                  </span>
+                  {conceptualReportModal.submissionId && (
+                    <span className="text-[10px] font-mono text-slate-400">
+                      ID: {conceptualReportModal.submissionId}
+                    </span>
+                  )}
+                </div>
                 <div className="p-3.5 rounded-xl bg-slate-900 text-slate-200 font-mono text-xs max-h-44 overflow-y-auto whitespace-pre-wrap leading-relaxed border border-slate-800">
                   {conceptualReportModal.conceptualAnswer || "(No answer text submitted)"}
                 </div>
               </div>
+
+              {/* AI Feedback Summary */}
+              {conceptualReportModal.feedbackSummary && (
+                <div className="p-3.5 rounded-xl bg-slate-100 border border-slate-200 space-y-1">
+                  <span className="text-xs font-bold text-slate-700 uppercase flex items-center gap-1.5">
+                    <Sparkles size={14} className="text-indigo-600" />
+                    AI Evaluation Summary:
+                  </span>
+                  <p className="text-xs text-slate-700 leading-relaxed">
+                    {conceptualReportModal.feedbackSummary}
+                  </p>
+                </div>
+              )}
+
+              {/* Rubric Warnings */}
+              {conceptualReportModal.rubricWarnings?.length > 0 && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900 space-y-1">
+                  <span className="font-bold uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                    <AlertTriangle size={13} className="text-amber-600" />
+                    Rubric Notices:
+                  </span>
+                  <ul className="list-disc pl-4 space-y-0.5">
+                    {conceptualReportModal.rubricWarnings.map((w, idx) => (
+                      <li key={idx}>{w}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Faculty Rubric & Criterion-Wise Evaluation Breakdown */}
+              {(conceptualReportModal.criteriaEvaluation?.length > 0 || conceptualReportModal.evaluationRubric?.length > 0) && (
+                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                  <span className="text-xs font-bold text-slate-700 uppercase flex items-center gap-1.5">
+                    <ShieldCheck size={14} className="text-indigo-600" />
+                    Criterion-Wise Rubric Evaluation
+                  </span>
+                  {conceptualReportModal.criteriaEvaluation?.length > 0 ? (
+                    <div className="space-y-2">
+                      {conceptualReportModal.criteriaEvaluation.map((crit, idx) => (
+                        <div key={idx} className="p-3 rounded-lg bg-white border border-slate-200 text-xs space-y-1.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-slate-800">{crit.criterion}</span>
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full border ${
+                                  crit.status === "fully_satisfied"
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : crit.status === "partially_satisfied"
+                                    ? "bg-amber-50 text-amber-700 border-amber-200"
+                                    : "bg-rose-50 text-rose-700 border-rose-200"
+                                }`}
+                              >
+                                {String(crit.status || "evaluated").replace(/_/g, " ")}
+                              </span>
+                              <span className="font-mono font-bold text-indigo-700">
+                                {crit.awardedMarks} / {crit.maximumMarks}
+                              </span>
+                            </div>
+                          </div>
+                          {crit.evidence && (
+                            <p className="text-[11px] text-slate-600">
+                              <strong className="text-slate-700">Evidence:</strong> {crit.evidence}
+                            </p>
+                          )}
+                          {crit.feedback && (
+                            <p className="text-[11px] text-slate-600">
+                              <strong className="text-slate-700">Feedback:</strong> {crit.feedback}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="space-y-1 text-xs text-slate-600">
+                      {conceptualReportModal.evaluationRubric.map((r, idx) => (
+                        <div key={idx} className="flex items-center justify-between bg-white px-3 py-1.5 rounded border border-slate-200">
+                          <span className="font-semibold text-slate-700">{r.criterion}</span>
+                          <span className="font-mono text-slate-500">
+                            {r.maxMarks ? `${r.maxMarks} Marks` : `${r.weight}%`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Correct Concepts (Strengths) */}
               {conceptualReportModal.correctConcepts?.length > 0 && (
                 <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200 space-y-1.5">
                   <span className="text-xs font-bold text-emerald-900 uppercase flex items-center gap-1.5">
                     <CheckCircle2 size={14} className="text-emerald-600" />
-                    Correct Concepts:
+                    Correct Concepts (Strengths):
                   </span>
                   <ul className="list-disc pl-5 text-xs text-emerald-800 space-y-1">
                     {conceptualReportModal.correctConcepts.map((item, idx) => (
@@ -1682,7 +1932,7 @@ const AdminExamDetails = () => {
                 <div className="p-3.5 rounded-xl bg-amber-50/60 border border-amber-200 space-y-1.5">
                   <span className="text-xs font-bold text-amber-900 uppercase flex items-center gap-1.5">
                     <AlertTriangle size={14} className="text-amber-600" />
-                    Missing Concepts:
+                    Missing Points &amp; Unhandled Concepts:
                   </span>
                   <ul className="list-disc pl-5 text-xs text-amber-800 space-y-1">
                     {conceptualReportModal.missingConcepts.map((item, idx) => (
@@ -1712,7 +1962,7 @@ const AdminExamDetails = () => {
                 <div className="p-3.5 rounded-xl bg-indigo-50/60 border border-indigo-200 space-y-1.5">
                   <span className="text-xs font-bold text-indigo-900 uppercase flex items-center gap-1.5">
                     <HelpCircle size={14} className="text-indigo-600" />
-                    Suggestions for Improvement &amp; Conceptual Hints:
+                    Suggestions for Improvement:
                   </span>
                   <ul className="list-disc pl-5 text-xs text-indigo-800 space-y-1">
                     {conceptualReportModal.suggestions.map((item, idx) => (
@@ -2101,6 +2351,106 @@ const AdminExamDetails = () => {
         jobId={activeExtractionJobId}
         onSavedSuccess={handleQuestionsSavedSuccess}
       />
+
+      {/* Student Completion Dashboard Modal (Faculty View) */}
+      {completionModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-2xl w-full p-6 space-y-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">
+                  Student Examination Completion Report
+                </h3>
+                <p className="text-xs text-slate-500">
+                  {completionData?.examTitle || exam.title}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCompletionModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {completionLoading ? (
+              <div className="py-10 text-center text-sm text-slate-500">
+                Loading completion report...
+              </div>
+            ) : completionError ? (
+              <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-sm">
+                {completionError}
+              </div>
+            ) : completionData ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="text-slate-500">Student Name</div>
+                  <div className="font-bold text-slate-900 mt-0.5">{completionData.studentName}</div>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="text-slate-500">Roll Number</div>
+                  <div className="font-mono font-bold text-slate-900 mt-0.5">{completionData.rollNo}</div>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="text-slate-500">Questions Progress</div>
+                  <div className="font-mono font-bold text-slate-900 mt-0.5">
+                    {completionData.questionsAttempted ?? 0} Attempted /{" "}
+                    {completionData.submittedQuestionCount ?? 0} Completed /{" "}
+                    {completionData.assignedQuestionCount ?? 1} Total
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="text-slate-500">Test Cases</div>
+                  <div className="font-mono font-bold text-slate-900 mt-0.5">
+                    <span className="text-emerald-600">{completionData.testCasesPassed ?? 0} Passed</span>
+                    {" / "}
+                    <span className="text-rose-600">{completionData.testCasesFailed ?? 0} Failed</span>
+                    {" "}({completionData.totalTestCases ?? 0} Total)
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="text-slate-500">Overall Score</div>
+                  <div className="font-mono font-bold text-indigo-700 mt-0.5">
+                    {completionData.overallScore ?? completionData.marks ?? 0} /{" "}
+                    {completionData.totalMarks ?? exam.totalMarks ?? 100}
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="text-slate-500">AI Evaluation Status</div>
+                  <div className="font-semibold text-slate-900 mt-0.5">
+                    {completionData.aiEvaluationStatus || completionData.conceptualAnswerStatus}
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="text-slate-500">Completion Time</div>
+                  <div className="font-mono text-slate-800 mt-0.5">
+                    {completionData.completedAt
+                      ? new Date(completionData.completedAt).toLocaleString()
+                      : "Not Completed"}
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="text-slate-500">Final Examination Status</div>
+                  <div className="font-bold text-slate-900 mt-0.5">
+                    {completionData.finalExamStatus || completionData.examStatus}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex justify-end pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setCompletionModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

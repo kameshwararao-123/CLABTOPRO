@@ -149,6 +149,11 @@ const examSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    completedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
   {
     timestamps: true,

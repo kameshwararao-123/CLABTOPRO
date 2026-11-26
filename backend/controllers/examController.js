@@ -1,3 +1,4 @@
+
 import mongoose from "mongoose";
 import Exam from "../models/Exam.js";
 import ExamQuestion from "../models/ExamQuestion.js";
@@ -9,9 +10,19 @@ import ExamCodeSubmission, {
 } from "../models/ExamCodeSubmission.js";
 import ExamAuditLog from "../models/ExamAuditLog.js";
 import User from "../models/User.js";
-import { evaluateConceptualAnswer } from "../services/examAIService.js";
-import { judgeSubmission, runCCode } from "../services/judgeService.js";
+import {
+  evaluateConceptualAnswer,
+  generateConceptualFallback,
+} from "../services/examAIService.js";
+import aiEvaluationQueue from "../services/aiEvaluationQueue.js";
+import AIEvaluationJob from "../models/AIEvaluationJob.js";
+import { judgeSubmission, runCCode, ExecutionServiceError } from "../services/judgeService.js";
+import submissionQueue from "../services/submissionQueue.js";
 import { parseGccDiagnostics } from "../utils/compilerParser.js";
+import { PHASE3_SECURITY_ENABLED } from "../configs/securityConfig.js";
+
+const isCompletedProgressStatus = (status) =>
+  status === "completed" || status === "successfully_completed";
 
 // Helper: Fisher-Yates Shuffle
 export const fisherYatesShuffle = (array) => {
@@ -1202,21 +1213,42 @@ export const startExam = async (req, res, next) => {
 export const completeExam = async (req, res, next) => {
   try {
     const { examId } = req.params;
+    const facultyId = req.user.userId;
     const exam = await Exam.findById(examId);
 
     if (!exam) {
       return res.status(404).json({ message: "Exam not found." });
     }
 
+    const completedAt = new Date();
     exam.status = "completed";
-    exam.completedAt = new Date();
+    exam.completedAt = completedAt;
+    exam.completedBy = facultyId;
     await exam.save();
+
+    // Mark all in-progress / not-yet-completed student progress records as completed due to faculty end
+    if (typeof StudentExamProgress.updateMany === "function") {
+      await StudentExamProgress.updateMany(
+        {
+          examId,
+          status: { $nin: ["successfully_completed", "completed"] },
+        },
+        {
+          $set: {
+            status: "completed",
+            completionReason: "faculty_ended",
+            completedAt,
+          },
+        }
+      );
+    }
 
     await ExamAuditLog.create({
       examId,
-      actorId: req.user.userId,
+      actorId: facultyId,
+      actorRole: "faculty",
       action: "exam_completed_by_faculty",
-      details: { completedAt: exam.completedAt },
+      details: { completedAt, facultyId },
     });
 
     res.status(200).json({
@@ -1234,7 +1266,17 @@ export const completeExam = async (req, res, next) => {
 export const getExamMonitoring = async (req, res, next) => {
   try {
     const { examId } = req.params;
-    const exam = await Exam.findById(examId).lean();
+    const applySelect = (query, fields) =>
+      query && typeof query.select === "function" ? query.select(fields) : query;
+
+    const examQuery = Exam.findById(examId);
+    const exam = await (
+      typeof examQuery?.select === "function"
+        ? examQuery.select(
+            "title subject examType status startedAt completedAt durationMinutes participatingStudents questionsPerStudent totalMarks"
+          )
+        : examQuery
+    ).lean();
 
     if (!exam) {
       return res.status(404).json({ message: "Exam not found." });
@@ -1246,13 +1288,20 @@ export const getExamMonitoring = async (req, res, next) => {
         .populate("questionId", "title difficulty questionNumber marks")
         .populate("assignedQuestionIds", "title difficulty questionNumber marks")
         .lean(),
-      StudentExamProgress.find({ examId }).lean(),
-      ExamAnswerSubmission.find({ examId })
-        .sort({ submittedAt: -1 })
-        .lean(),
-      ExamCodeSubmission.find({ examId })
-        .sort({ submittedAt: -1 })
-        .lean(),
+      applySelect(
+        StudentExamProgress.find({ examId }),
+        exam.examType === "viva"
+          ? "-currentCode -lastConceptualAnswer -facultyFeedback"
+          : "-currentCode -lastConceptualAnswer -facultyFeedback -vivaAnswers"
+      ).lean(),
+      applySelect(
+        ExamAnswerSubmission.find({ examId }).sort({ submittedAt: -1 }),
+        "studentId questionId status isApproved facultyDecision aiEvaluation.errorPercentage submittedAt attemptNumber"
+      ).lean(),
+      applySelect(
+        ExamCodeSubmission.find({ examId }).sort({ submittedAt: -1 }),
+        "studentId questionId status testCasesPassed totalTestCases allPassed executionTime submittedAt"
+      ).lean(),
     ]);
 
     // Fallback: If no allocations have been created yet, generate virtual entries for participating students
@@ -1268,28 +1317,44 @@ export const getExamMonitoring = async (req, res, next) => {
     }
 
     const progressMap = new Map(progresses.map((p) => [p.studentId.toString(), p]));
+    // Map of studentId -> latest ExamAnswerSubmission
     const latestAnswerMap = new Map();
+    // Map of "studentId_questionId" -> latest ExamAnswerSubmission
+    const latestQuestionAnswerMap = new Map();
+
     for (const a of answerSubs) {
       const sId = a.studentId.toString();
       if (!latestAnswerMap.has(sId)) {
         latestAnswerMap.set(sId, a);
       }
+      if (a.questionId) {
+        const sqKey = `${sId}_${a.questionId.toString()}`;
+        if (!latestQuestionAnswerMap.has(sqKey)) {
+          latestQuestionAnswerMap.set(sqKey, a);
+        }
+      }
     }
 
     const latestCodeMap = new Map();
+    const latestQuestionCodeMap = new Map();
     for (const c of codeSubs) {
       const sId = c.studentId.toString();
       if (!latestCodeMap.has(sId)) {
         latestCodeMap.set(sId, c);
       }
+      if (c.questionId) {
+        const sqKey = `${sId}_${c.questionId.toString()}`;
+        if (!latestQuestionCodeMap.has(sqKey)) {
+          latestQuestionCodeMap.set(sqKey, c);
+        }
+      }
     }
 
-    const rows = allocations.map((alloc) => {
+    const rows = [];
+    for (const alloc of allocations) {
       const student = alloc.studentId;
       const sId = student?._id?.toString() || "";
       const prog = progressMap.get(sId);
-      const ans = latestAnswerMap.get(sId);
-      const code = latestCodeMap.get(sId);
 
       const assigned =
         alloc.assignedQuestionIds && alloc.assignedQuestionIds.length > 0
@@ -1299,186 +1364,243 @@ export const getExamMonitoring = async (req, res, next) => {
           : [];
       const assignedTitles = assigned.map((q) => q.title).join(", ");
 
-      const vivaAnswersObj = prog?.vivaAnswers
-        ? (prog.vivaAnswers instanceof Map ? Object.fromEntries(prog.vivaAnswers) : prog.vivaAnswers)
-        : {};
-
-      const liveAttemptedCount = Object.values(vivaAnswersObj).filter(
-        (a) => a && a.selectedOption && String(a.selectedOption).trim() !== ""
-      ).length;
-
-      const vivaAttempted = prog?.vivaResult?.attempted ?? liveAttemptedCount;
-
-      // Check time expiration
-      const examEnded = exam.status === "completed";
-      const examTimeExpired = exam.startedAt && exam.durationMinutes
-        ? Date.now() > new Date(exam.startedAt).getTime() + exam.durationMinutes * 60 * 1000
-        : false;
-      const isTimeExpired =
-        (examEnded || examTimeExpired) &&
-        prog?.status !== "completed" &&
-        prog?.status !== "successfully_completed";
-
-      const hasSubmittedConceptual = Boolean(
-        ans || (prog?.lastConceptualAnswer && prog.lastConceptualAnswer.trim().length > 20)
-      );
-      const hasApprovedConceptual = Boolean(
-        (ans && ans.isApproved) ||
-        prog?.compilerAllowed ||
-        prog?.status === "coding_in_progress" ||
-        prog?.status === "compiler_access_granted"
-      );
-      const hasSubmittedCode = Boolean(code);
-      const allTestsPassed = Boolean(
-        code && code.allPassed && code.testCasesPassed > 0 && code.testCasesPassed === code.totalTestCases
-      );
-
-      const isSuccessfullyCompleted =
-        (prog?.status === "completed" || prog?.status === "successfully_completed") &&
-        (exam.examType === "viva" || (hasApprovedConceptual && hasSubmittedCode && allTestsPassed));
-
-      let notepadStatus = "Pending";
-      if (prog?.status === "notepad_correction_required" || prog?.conceptualStatus === "correction_required") {
-        notepadStatus = "Correction Required";
-      } else if (hasSubmittedConceptual) {
-        notepadStatus = "Submitted";
-      } else if (
-        prog?.status === "answer_in_progress" ||
-        (prog?.lastConceptualAnswer && prog.lastConceptualAnswer.trim().length > 0)
-      ) {
-        notepadStatus = "In Progress";
+      // Calculate Solved Questions (only successfully submitted questions, never drafts/in-progress)
+      const studentTotalAssigned = assigned.length || exam.questionsPerStudent || 1;
+      let studentSolvedQuestions = 0;
+      if (assigned.length > 0) {
+        for (const qItem of assigned) {
+          const itemKey = qItem._id.toString();
+          const itemProg = prog?.questionProgress
+            ? (prog.questionProgress.get ? prog.questionProgress.get(itemKey) : prog.questionProgress[itemKey])
+            : null;
+          const itemCode = latestQuestionCodeMap.get(`${sId}_${itemKey}`) || (assigned.length === 1 ? latestCodeMap.get(sId) : null);
+          const isItemSubmittedSuccess = Boolean(
+            itemProg?.isCompleted ||
+            itemProg?.status === "completed" ||
+            (itemCode && itemCode.allPassed && itemCode.testCasesPassed > 0 && itemCode.testCasesPassed === itemCode.totalTestCases)
+          );
+          if (isItemSubmittedSuccess) {
+            studentSolvedQuestions += 1;
+          }
+        }
       }
+      const solvedQuestionsLabel = `${studentSolvedQuestions}/${studentTotalAssigned}`;
 
-      // Evaluation Action & Status determination for Faculty Control
-      let aiEvaluationStatus = "Pending";
-      let evaluationAction = "not_submitted"; // not_submitted | evaluate | evaluating | allow_to_code | return_to_notepad | approved | returned
-      let canAllowToCode = false;
-      let canReturnToNotepad = false;
+      const questionsToIterate = assigned.length > 0 ? assigned : [null];
 
-      const latestError = ans?.aiEvaluation?.errorPercentage ?? prog?.lastAIEvaluation?.errorPercentage ?? null;
+      for (let qIndex = 0; qIndex < questionsToIterate.length; qIndex++) {
+        const currentTargetQ = questionsToIterate[qIndex];
+        const assignedQId = currentTargetQ?._id || null;
+        const assignedQTitle = currentTargetQ?.title || "";
 
-      if (prog?.status === "evaluating" || prog?.conceptualStatus === "evaluating") {
-        aiEvaluationStatus = "Evaluating...";
-        evaluationAction = "evaluating";
-      } else if (prog?.compilerAllowed || prog?.status === "coding_in_progress" || prog?.status === "compiler_access_granted" || (ans && ans.facultyDecision === "allow_to_code")) {
-        aiEvaluationStatus = "Approved (Compiler Unlocked)";
-        evaluationAction = "approved";
-      } else if (prog?.status === "notepad_correction_required" || prog?.conceptualStatus === "correction_required" || (ans && ans.facultyDecision === "return_to_notepad")) {
-        aiEvaluationStatus = latestError !== null ? `Returned (Error: ${latestError}%)` : "Correction Required";
-        evaluationAction = "return_to_notepad";
-        canReturnToNotepad = true;
-      } else if (latestError !== null && (ans?.status === "evaluated" || prog?.conceptualStatus === "evaluated" || prog?.status === "waiting_faculty_decision")) {
-        if (latestError < 50) {
-          aiEvaluationStatus = `Evaluated (${latestError}% Error)`;
-          evaluationAction = "allow_to_code";
-          canAllowToCode = true;
-        } else {
-          aiEvaluationStatus = `Evaluated (${latestError}% Error)`;
+        // Resolve question-specific answer submission
+        const sqKey = assignedQId ? `${sId}_${assignedQId.toString()}` : null;
+        const ans = (sqKey && latestQuestionAnswerMap.get(sqKey)) || (assigned.length <= 1 ? latestAnswerMap.get(sId) : null);
+        const code = (sqKey && latestQuestionCodeMap.get(sqKey)) || (assigned.length <= 1 ? latestCodeMap.get(sId) : null);
+
+        // Resolve question-specific progress
+        const qProg = assignedQId && prog?.questionProgress
+          ? (prog.questionProgress.get ? prog.questionProgress.get(assignedQId.toString()) : prog.questionProgress[assignedQId.toString()])
+          : null;
+
+        const vivaAnswersObj = prog?.vivaAnswers
+          ? (prog.vivaAnswers instanceof Map ? Object.fromEntries(prog.vivaAnswers) : prog.vivaAnswers)
+          : {};
+
+        const liveAttemptedCount = Object.values(vivaAnswersObj).filter(
+          (a) => a && a.selectedOption && String(a.selectedOption).trim() !== ""
+        ).length;
+
+        const vivaAttempted = prog?.vivaResult?.attempted ?? liveAttemptedCount;
+
+        // Check time expiration
+        const examEnded = exam.status === "completed";
+        const examTimeExpired = exam.startedAt && exam.durationMinutes
+          ? Date.now() > new Date(exam.startedAt).getTime() + exam.durationMinutes * 60 * 1000
+          : false;
+        const isTimeExpired =
+          (examEnded || examTimeExpired) &&
+          prog?.status !== "completed" &&
+          prog?.status !== "successfully_completed";
+
+        const hasSubmittedConceptual = Boolean(
+          ans || (qProg?.lastConceptualAnswer && qProg.lastConceptualAnswer.trim().length > 20) || (assigned.length <= 1 && prog?.lastConceptualAnswer && prog.lastConceptualAnswer.trim().length > 20)
+        );
+        const hasApprovedConceptual = Boolean(
+          (ans && ans.isApproved) ||
+          qProg?.compilerAllowed ||
+          (assigned.length <= 1 && prog?.compilerAllowed) ||
+          qProg?.status === "coding_in_progress" ||
+          qProg?.status === "compiler_access_granted"
+        );
+        const hasSubmittedCode = Boolean(code);
+        const allTestsPassed = Boolean(
+          code && code.allPassed && code.testCasesPassed > 0 && code.testCasesPassed === code.totalTestCases
+        );
+
+        const isSuccessfullyCompleted =
+          (prog?.status === "completed" || prog?.status === "successfully_completed") &&
+          (exam.examType === "viva" || (hasApprovedConceptual && hasSubmittedCode && allTestsPassed));
+
+        let notepadStatus = "Pending";
+        const currentQStatus = qProg?.status || (assigned.length <= 1 ? prog?.status : "not_started");
+        const currentQConceptualStatus = qProg?.conceptualStatus || (assigned.length <= 1 ? prog?.conceptualStatus : "pending");
+
+        if (currentQStatus === "notepad_correction_required" || currentQConceptualStatus === "correction_required") {
+          notepadStatus = "Correction Required";
+        } else if (hasSubmittedConceptual) {
+          notepadStatus = "Submitted";
+        } else if (
+          currentQStatus === "answer_in_progress" ||
+          (qProg?.lastConceptualAnswer && qProg.lastConceptualAnswer.trim().length > 0) ||
+          (assigned.length <= 1 && prog?.lastConceptualAnswer && prog.lastConceptualAnswer.trim().length > 0)
+        ) {
+          notepadStatus = "In Progress";
+        }
+
+        // Evaluation Action & Status determination for Faculty Control
+        let aiEvaluationStatus = "Pending";
+        let evaluationAction = "not_submitted"; // not_submitted | evaluate | evaluating | allow_to_code | return_to_notepad | approved | returned
+        let canAllowToCode = false;
+        let canReturnToNotepad = false;
+
+        const latestError = ans?.aiEvaluation?.errorPercentage ?? qProg?.lastAIEvaluation?.errorPercentage ?? (assigned.length <= 1 ? prog?.lastAIEvaluation?.errorPercentage : null) ?? null;
+
+        if (currentQStatus === "evaluating" || currentQConceptualStatus === "evaluating") {
+          aiEvaluationStatus = "Evaluating...";
+          evaluationAction = "evaluating";
+        } else if (hasApprovedConceptual || (ans && ans.facultyDecision === "allow_to_code")) {
+          aiEvaluationStatus = "Approved (Compiler Unlocked)";
+          evaluationAction = "approved";
+        } else if (currentQStatus === "notepad_correction_required" || currentQConceptualStatus === "correction_required" || (ans && ans.facultyDecision === "return_to_notepad")) {
+          aiEvaluationStatus = latestError !== null ? `Returned (Error: ${latestError}%)` : "Correction Required";
           evaluationAction = "return_to_notepad";
           canReturnToNotepad = true;
+        } else if (latestError !== null && (ans?.status === "evaluated" || currentQConceptualStatus === "evaluated" || currentQStatus === "waiting_faculty_decision")) {
+          if (latestError < 50) {
+            aiEvaluationStatus = `Evaluated (${latestError}% Error)`;
+            evaluationAction = "allow_to_code";
+            canAllowToCode = true;
+          } else {
+            aiEvaluationStatus = `Evaluated (${latestError}% Error)`;
+            evaluationAction = "return_to_notepad";
+            canReturnToNotepad = true;
+          }
+        } else if (hasSubmittedConceptual) {
+          aiEvaluationStatus = "Waiting for Faculty Evaluation";
+          evaluationAction = "evaluate";
+        } else {
+          aiEvaluationStatus = "Not Submitted";
+          evaluationAction = "not_submitted";
         }
-      } else if (hasSubmittedConceptual) {
-        aiEvaluationStatus = "Waiting for Faculty Evaluation";
-        evaluationAction = "evaluate";
-      } else {
-        aiEvaluationStatus = "Not Submitted";
-        evaluationAction = "not_submitted";
+
+        let codingStatus = "Pending";
+        if (allTestsPassed) {
+          codingStatus = "Passed";
+        } else if (hasSubmittedCode) {
+          codingStatus = "Submitted";
+        } else if (hasApprovedConceptual) {
+          codingStatus = "In Progress";
+        }
+
+        let testCasesStatus = "Pending";
+        if (hasSubmittedCode) {
+          testCasesStatus = `${code.testCasesPassed} / ${code.totalTestCases} Passed`;
+        }
+
+        let studentExamStatus = "Not Started";
+        if (isSuccessfullyCompleted) {
+          studentExamStatus = "Successfully Completed";
+        } else if (isTimeExpired) {
+          studentExamStatus = "Time Expired";
+        } else if (hasSubmittedCode && !allTestsPassed) {
+          studentExamStatus = "Test Cases Failed";
+        } else if (hasApprovedConceptual && !hasSubmittedCode) {
+          studentExamStatus = "Coding In Progress";
+        } else if (currentQStatus === "waiting_faculty_decision") {
+          studentExamStatus = "Waiting for Faculty Decision";
+        } else if (currentQStatus === "notepad_correction_required" || currentQConceptualStatus === "correction_required") {
+          studentExamStatus = "Correction Required";
+        } else if (currentQStatus === "evaluating") {
+          studentExamStatus = "AI Evaluation in Progress";
+        } else if (currentQStatus === "awaiting_faculty_evaluation" || (hasSubmittedConceptual && !ans?.aiEvaluation)) {
+          studentExamStatus = "Waiting for Faculty Evaluation";
+        } else if (hasSubmittedConceptual && !hasApprovedConceptual) {
+          studentExamStatus = "Waiting for Faculty Evaluation";
+        } else if (
+          prog?.status === "instructions_acknowledged" ||
+          prog?.status === "question_assigned" ||
+          prog?.status === "notepad_pending" ||
+          prog?.status === "answer_in_progress"
+        ) {
+          studentExamStatus = "Notepad Pending";
+        } else {
+          studentExamStatus = "Not Started";
+        }
+
+        const lastActivityTime =
+          qProg?.lastCodeSavedAt ||
+          qProg?.lastAnswerSavedAt ||
+          code?.submittedAt ||
+          ans?.submittedAt ||
+          prog?.lastCodeSavedAt ||
+          prog?.lastAnswerSavedAt ||
+          prog?.lastDraftSavedAt ||
+          prog?.updatedAt ||
+          qProg?.completedAt ||
+          prog?.completedAt ||
+          null;
+
+        rows.push({
+          rowId: assignedQId ? `${sId}_${assignedQId.toString()}` : sId,
+          studentId: sId,
+          username: student?.username || "Unknown",
+          rollNo: student?.rollNo || "",
+          email: student?.email || "",
+          assignedQuestion:
+            assignedQTitle ||
+            assignedTitles ||
+            alloc.questionId?.title ||
+            (exam.examType === "viva" ? "Viva MCQ Bank" : "Not Assigned"),
+          questionNumber: currentTargetQ?.questionNumber || (assigned.length > 1 ? `Q${qIndex + 1}` : "Q1"),
+          totalAssignedQuestions: studentTotalAssigned,
+          solvedQuestionsCount: studentSolvedQuestions,
+          solvedQuestionsLabel,
+          difficulty: currentTargetQ?.difficulty || alloc.questionId?.difficulty || "Medium",
+          status: currentQStatus || "not_started",
+          instructionsAcknowledged: Boolean(prog?.instructionsAcknowledged),
+          conceptualAttemptsCount: qProg?.conceptualAttemptsCount ?? (assigned.length <= 1 ? prog?.conceptualAttemptsCount : 0) ?? 0,
+          conceptualApproved: Boolean(hasApprovedConceptual),
+          lastConceptualError: latestError,
+          lastUnderstandingPercentage: latestError !== null ? Math.max(0, 100 - latestError) : null,
+          aiEvaluation: latestError !== null ? { errorPercentage: latestError } : null,
+          targetQuestionId: assignedQId,
+          questionTitle: assignedQTitle,
+          facultyDecision: ans?.facultyDecision || qProg?.facultyDecision || (assigned.length <= 1 ? prog?.facultyDecision : "pending") || "pending",
+          evaluationAction,
+          canAllowToCode,
+          canReturnToNotepad,
+          codeStatus: code?.status || "not_submitted",
+          testCasesPassed: code?.testCasesPassed || 0,
+          totalTestCases: code?.totalTestCases || 0,
+          completedAt: qProg?.completedAt || prog?.completedAt || null,
+          lastActivityTime,
+          notepadStatus,
+          aiEvaluationStatus,
+          codingStatus,
+          testCasesStatus,
+          examStatus: studentExamStatus,
+          isSuccessfullyCompleted,
+          vivaResult: prog?.vivaResult || null,
+          vivaScore: prog?.vivaResult?.score ?? null,
+          vivaPercentage: prog?.vivaResult?.percentage ?? null,
+          vivaAttempted,
+          vivaCorrect: prog?.vivaResult?.correct ?? 0,
+          vivaIncorrect: prog?.vivaResult?.incorrect ?? 0,
+          vivaUnanswered: prog?.vivaResult?.unanswered ?? 0,
+        });
       }
-
-      let codingStatus = "Pending";
-      if (allTestsPassed) {
-        codingStatus = "Passed";
-      } else if (hasSubmittedCode) {
-        codingStatus = "Submitted";
-      } else if (hasApprovedConceptual || prog?.compilerAllowed) {
-        codingStatus = "In Progress";
-      }
-
-      let testCasesStatus = "Pending";
-      if (hasSubmittedCode) {
-        testCasesStatus = `${code.testCasesPassed} / ${code.totalTestCases} Passed`;
-      }
-
-      let studentExamStatus = "Not Started";
-      if (isSuccessfullyCompleted) {
-        studentExamStatus = "Successfully Completed";
-      } else if (isTimeExpired) {
-        studentExamStatus = "Time Expired";
-      } else if (hasSubmittedCode && !allTestsPassed) {
-        studentExamStatus = "Test Cases Failed";
-      } else if (hasApprovedConceptual && !hasSubmittedCode) {
-        studentExamStatus = "Coding In Progress";
-      } else if (prog?.status === "waiting_faculty_decision") {
-        studentExamStatus = "Waiting for Faculty Decision";
-      } else if (prog?.status === "notepad_correction_required" || prog?.conceptualStatus === "correction_required") {
-        studentExamStatus = "Correction Required";
-      } else if (prog?.status === "evaluating") {
-        studentExamStatus = "AI Evaluation in Progress";
-      } else if (prog?.status === "awaiting_faculty_evaluation" || (hasSubmittedConceptual && !ans?.aiEvaluation)) {
-        studentExamStatus = "Waiting for Faculty Evaluation";
-      } else if (hasSubmittedConceptual && !hasApprovedConceptual) {
-        studentExamStatus = "Waiting for Faculty Evaluation";
-      } else if (
-        prog?.status === "instructions_acknowledged" ||
-        prog?.status === "question_assigned" ||
-        prog?.status === "notepad_pending" ||
-        prog?.status === "answer_in_progress"
-      ) {
-        studentExamStatus = "Notepad Pending";
-      } else {
-        studentExamStatus = "Not Started";
-      }
-
-      const assignedQId = (assigned[0] && assigned[0]._id) || alloc.questionId?._id || null;
-      const assignedQTitle = (assigned[0] && assigned[0].title) || alloc.questionId?.title || "";
-
-      return {
-        studentId: sId,
-        username: student?.username || "Unknown",
-        rollNo: student?.rollNo || "",
-        email: student?.email || "",
-        assignedQuestion:
-          assignedTitles ||
-          alloc.questionId?.title ||
-          (exam.examType === "viva" ? "Viva MCQ Bank" : "Not Assigned"),
-        assignedQuestions: assigned,
-        totalAssignedQuestions: assigned.length,
-        difficulty: alloc.questionId?.difficulty || "Medium",
-        status: prog?.status || "not_started",
-        instructionsAcknowledged: Boolean(prog?.instructionsAcknowledged),
-        conceptualAttemptsCount: prog?.conceptualAttemptsCount || 0,
-        conceptualApproved: Boolean(prog?.compilerAllowed),
-        lastConceptualError: latestError,
-        lastUnderstandingPercentage: latestError !== null ? Math.max(0, 100 - latestError) : null,
-        lastConceptualAnswer: ans?.answerText || prog?.lastConceptualAnswer || "",
-        aiEvaluation: ans?.aiEvaluation || prog?.lastAIEvaluation || null,
-        targetQuestionId: assignedQId,
-        questionTitle: assignedQTitle,
-        facultyDecision: ans?.facultyDecision || prog?.facultyDecision || "pending",
-        facultyFeedback: ans?.facultyFeedback || prog?.facultyFeedback || "",
-        evaluationAction,
-        canAllowToCode,
-        canReturnToNotepad,
-        codeStatus: code?.status || "not_submitted",
-        testCasesPassed: code?.testCasesPassed || 0,
-        totalTestCases: code?.totalTestCases || 0,
-        completedAt: prog?.completedAt || null,
-        notepadStatus,
-        aiEvaluationStatus,
-        codingStatus,
-        testCasesStatus,
-        examStatus: studentExamStatus,
-        isSuccessfullyCompleted,
-        vivaResult: prog?.vivaResult || null,
-        vivaAnswers: vivaAnswersObj,
-        vivaScore: prog?.vivaResult?.score ?? null,
-        vivaPercentage: prog?.vivaResult?.percentage ?? null,
-        vivaAttempted,
-        vivaCorrect: prog?.vivaResult?.correct ?? 0,
-        vivaIncorrect: prog?.vivaResult?.incorrect ?? 0,
-        vivaUnanswered: prog?.vivaResult?.unanswered ?? 0,
-      };
-    });
+    }
 
     let vivaSummary = null;
     let codingSummary = null;
@@ -1533,6 +1655,31 @@ export const getExamMonitoring = async (req, res, next) => {
       };
     }
 
+    const searchFilter = String(req.query?.search || "").trim().toLowerCase();
+    const statusFilter = String(req.query?.status || "").trim();
+    const filteredRows = rows.filter((r) => {
+      if (statusFilter && statusFilter !== "all" && r.examStatus !== statusFilter) {
+        return false;
+      }
+      if (searchFilter) {
+        return (
+          r.rollNo?.toLowerCase().includes(searchFilter) ||
+          r.username?.toLowerCase().includes(searchFilter) ||
+          r.email?.toLowerCase().includes(searchFilter)
+        );
+      }
+      return true;
+    });
+
+    const hasPagination =
+      req.query?.page !== undefined || req.query?.limit !== undefined;
+    const pageNum = Math.max(1, parseInt(req.query?.page || "1", 10) || 1);
+    const limitNum = Math.min(200, Math.max(1, parseInt(req.query?.limit || "25", 10) || 25));
+    const totalFiltered = filteredRows.length;
+    const pagedRows = hasPagination
+      ? filteredRows.slice((pageNum - 1) * limitNum, pageNum * limitNum)
+      : filteredRows;
+
     res.status(200).json({
       examTitle: exam.title,
       examType: exam.examType,
@@ -1542,7 +1689,17 @@ export const getExamMonitoring = async (req, res, next) => {
       totalStudents: allocations.length,
       vivaSummary,
       codingSummary,
-      students: rows,
+      students: pagedRows,
+      ...(hasPagination
+        ? {
+            pagination: {
+              page: pageNum,
+              limit: limitNum,
+              total: totalFiltered,
+              totalPages: Math.max(1, Math.ceil(totalFiltered / limitNum)),
+            },
+          }
+        : {}),
     });
   } catch (error) {
     next(error);
@@ -1676,10 +1833,17 @@ export const getStudentExams = async (req, res, next) => {
       studentId,
     }).lean();
 
+    const allocations = await ExamAllocation.find({
+      examId: { $in: examIds },
+      studentId,
+    }).lean();
+
     const progMap = new Map(progresses.map((p) => [p.examId.toString(), p]));
+    const allocMap = new Map(allocations.map((a) => [a.examId.toString(), a]));
 
     const enriched = exams.map((exam) => {
       const prog = progMap.get(exam._id.toString());
+      const alloc = allocMap.get(exam._id.toString());
       const isExamCompleted = prog?.status === "completed" || prog?.status === "successfully_completed";
       const examEnded = exam.status === "completed";
       const examTimeExpired = exam.startedAt && exam.durationMinutes
@@ -1687,11 +1851,63 @@ export const getStudentExams = async (req, res, next) => {
         : false;
       const isTimeExpired = (examEnded || examTimeExpired) && !isExamCompleted;
 
+      // Calculate per-question dynamic progress tracking
       let effectiveStatus = prog?.status || "not_started";
-      if (isExamCompleted) {
-        effectiveStatus = "successfully_completed";
-      } else if (isTimeExpired) {
-        effectiveStatus = "time_expired";
+      let displayProgress = "Not Started";
+      let completedCount = 0;
+      let totalAssigned = 1;
+
+      if (exam.examType === "viva") {
+        totalAssigned = exam.questionsPerStudent || (Array.isArray(exam.vivaQuestions) ? exam.vivaQuestions.length : 1);
+        if (isExamCompleted) {
+          effectiveStatus = "successfully_completed";
+          displayProgress = "Completed";
+          completedCount = totalAssigned;
+        } else if (isTimeExpired) {
+          effectiveStatus = "time_expired";
+          displayProgress = "Time Expired";
+        } else if (prog?.status === "in_progress" || prog?.status === "instructions_acknowledged") {
+          displayProgress = "In Progress";
+        }
+      } else {
+        // Coding exam (internal / external)
+        const assignedIds = alloc?.assignedQuestionIds?.length > 0
+          ? alloc.assignedQuestionIds
+          : alloc?.questionId
+          ? [alloc.questionId]
+          : [];
+        totalAssigned = assignedIds.length || exam.questionsPerStudent || 1;
+
+        if (prog?.questionProgress) {
+          // prog.questionProgress may be an Object when .lean() is used
+          const qpEntries = prog.questionProgress instanceof Map
+            ? Array.from(prog.questionProgress.values())
+            : Object.values(prog.questionProgress);
+          completedCount = qpEntries.filter((qp) => Boolean(qp && qp.isCompleted)).length;
+        } else if (isExamCompleted) {
+          completedCount = totalAssigned;
+        }
+
+        // Check if student has started the exam (acknowledged instructions or progressed past not_started)
+        const hasStarted = Boolean(
+          prog &&
+          (prog.instructionsAcknowledged ||
+            (prog.status && prog.status !== "not_started"))
+        );
+
+        if (isExamCompleted) {
+          effectiveStatus = "successfully_completed";
+          displayProgress = `Completed (${totalAssigned}/${totalAssigned} Completed)`;
+        } else if (isTimeExpired) {
+          effectiveStatus = "time_expired";
+          displayProgress = `Time Expired (${completedCount}/${totalAssigned} Completed)`;
+        } else if (hasStarted) {
+          effectiveStatus = "in_progress";
+          displayProgress = `In Progress (${completedCount}/${totalAssigned} Completed)`;
+        } else {
+          effectiveStatus = "not_started";
+          displayProgress = "Not Started";
+        }
       }
 
       return {
@@ -1712,6 +1928,9 @@ export const getStudentExams = async (req, res, next) => {
         status: exam.status,
         startedAt: exam.startedAt,
         studentStatus: effectiveStatus,
+        displayProgress,
+        completedQuestionsCount: completedCount,
+        totalAssignedQuestions: totalAssigned,
         isCompleted: isExamCompleted,
         isTimeExpired,
         compilerAllowed: Boolean(prog?.compilerAllowed),
@@ -1749,13 +1968,33 @@ export const getStudentExamInstructions = async (req, res, next) => {
       });
     }
 
+    let progress = await StudentExamProgress.findOne({ examId, studentId }).lean();
+
+    // Check if examination has been completed (by student or faculty)
+    if (
+      exam.status === "completed" ||
+      (progress && (progress.status === "completed" || progress.status === "successfully_completed"))
+    ) {
+      const facultyEnded = exam.status === "completed";
+      return res.status(200).json({
+        exam,
+        progress,
+        isCompleted: true,
+        facultyEndedExam: facultyEnded,
+        completionReason: facultyEnded ? "faculty_ended" : (progress?.completionReason || "all_questions_submitted"),
+        redirect: `/exams/${examId}/completed`,
+        message: facultyEnded
+          ? "Examination has been ended by the faculty."
+          : "Examination has already been completed.",
+      });
+    }
+
     if (exam.status !== "in_progress" && exam.status !== "completed") {
       return res.status(403).json({
         message: "This examination has not been started by the faculty yet.",
       });
     }
 
-    let progress = await StudentExamProgress.findOne({ examId, studentId }).lean();
     if (!progress) {
       progress = await StudentExamProgress.create({
         examId,
@@ -1798,7 +2037,7 @@ export const acknowledgeInstructions = async (req, res, next) => {
         $set: {
           instructionsAcknowledged: true,
           instructionsAcknowledgedAt: new Date(),
-          status: "instructions_acknowledged",
+          status: "in_progress",
         },
       },
       { upsert: true, new: true }
@@ -1828,11 +2067,33 @@ export const getMyAssignedQuestion = async (req, res, next) => {
       participatingStudents: studentId,
     }).select("status title subject durationMinutes maxConceptualAttempts startedAt questionsPerStudent");
 
-    if (!exam || (exam.status !== "in_progress" && exam.status !== "completed")) {
-      return res.status(403).json({ message: "Exam is not active." });
+    if (!exam) {
+      return res.status(404).json({ message: "Exam not found or you are not enrolled as a participating student." });
     }
 
     const progress = await StudentExamProgress.findOne({ examId, studentId });
+
+    // Check if examination has already been completed (by student or faculty)
+    if (
+      exam.status === "completed" ||
+      (progress && (progress.status === "completed" || progress.status === "successfully_completed"))
+    ) {
+      const facultyEnded = exam.status === "completed";
+      return res.status(403).json({
+        message: facultyEnded
+          ? "Examination has been ended by faculty. Access to active question interface is locked."
+          : "Examination has already been completed. Access to active question interface is locked.",
+        isCompleted: true,
+        facultyEndedExam: facultyEnded,
+        completionReason: facultyEnded ? "faculty_ended" : (progress?.completionReason || "all_questions_submitted"),
+        redirect: `/exams/${examId}/completed`,
+      });
+    }
+
+    if (exam.status !== "in_progress") {
+      return res.status(403).json({ message: "Exam is not active." });
+    }
+
     if (!progress || !progress.instructionsAcknowledged) {
       return res.status(403).json({
         message: "Please read and acknowledge the examination instructions first.",
@@ -1895,18 +2156,53 @@ export const getMyAssignedQuestion = async (req, res, next) => {
         expectedOutput: tc.expectedOutput,
       }));
 
+    const previousAttempts = await ExamAnswerSubmission.find({
+      examId,
+      studentId,
+      questionId: q._id,
+    })
+      .sort({ attemptNumber: -1 })
+      .lean();
+
+    const latestSub = previousAttempts[0] || null;
+
     // Resolve per-question progress
     const qKey = q._id.toString();
     const qProg = progress.questionProgress?.get
       ? progress.questionProgress.get(qKey)
       : progress.questionProgress?.[qKey];
 
-    const isQCompilerAllowed = qProg ? qProg.compilerAllowed : progress.compilerAllowed;
-    const isQCompleted = qProg ? qProg.isCompleted : progress.status === "completed";
-    const lastQAnswer = qProg ? qProg.lastConceptualAnswer : progress.lastConceptualAnswer;
-    const lastQEvaluation = qProg ? qProg.lastAIEvaluation : progress.lastAIEvaluation;
-    const qAttemptsCount = qProg ? qProg.conceptualAttemptsCount : progress.conceptualAttemptsCount;
-    const qCode = qProg?.currentCode || progress.currentCode || "";
+    // Check if this specific question has been approved for compiler access
+    const isQCompilerAllowed = Boolean(
+      qProg?.compilerAllowed || (assigned.length === 1 && progress.compilerAllowed)
+    );
+    const isQCompleted = qProg
+      ? Boolean(qProg.isCompleted)
+      : isCompletedProgressStatus(progress.status);
+    const lastQAnswer =
+      qProg?.lastConceptualAnswer !== undefined
+        ? qProg.lastConceptualAnswer
+        : assigned.length === 1
+        ? progress.lastConceptualAnswer || ""
+        : "";
+    const qAnswerVersion =
+      qProg?.answerDraftVersion ?? (assigned.length === 1 ? (progress.answerDraftVersion ?? 0) : 0);
+    const qLastAnswerSavedAt =
+      qProg?.lastAnswerSavedAt || (assigned.length === 1 ? (progress.lastAnswerSavedAt || null) : null);
+    const lastQEvaluation =
+      (latestSub && latestSub.aiEvaluation) ||
+      qProg?.lastAIEvaluation ||
+      (assigned.length === 1 ? progress.lastAIEvaluation : null);
+    const qAttemptsCount = qProg ? (qProg.conceptualAttemptsCount || 0) : (assigned.length === 1 ? (progress.conceptualAttemptsCount || 0) : 0);
+    const qCode = qProg?.currentCode !== undefined ? qProg.currentCode : (assigned.length === 1 ? (progress.currentCode || "") : "");
+    const qCodeVersion = qProg?.codeDraftVersion ?? (assigned.length === 1 ? (progress.codeDraftVersion ?? 0) : 0);
+    const qLastCodeSavedAt = qProg?.lastCodeSavedAt || (assigned.length === 1 ? (progress.lastCodeSavedAt || null) : null);
+    const qConceptualStatus = qProg?.conceptualStatus || (assigned.length === 1 ? progress.conceptualStatus : (latestSub ? latestSub.status : "pending"));
+    const qStatus = qProg?.status || (assigned.length === 1 ? progress.status : "not_started");
+    const qFacultyDecision = qProg?.facultyDecision || (assigned.length === 1 ? progress.facultyDecision : (latestSub?.facultyDecision || "pending"));
+    const qFacultyFeedback = qProg?.facultyFeedback || (assigned.length === 1 ? progress.facultyFeedback : (latestSub?.facultyFeedback || ""));
+    const qSubmittedAt = qProg?.submittedAt || (assigned.length === 1 ? progress.submittedAt : (latestSub?.submittedAt || null));
+    const qEvaluatedAt = qProg?.evaluatedAt || (assigned.length === 1 ? progress.evaluatedAt : (latestSub?.evaluatedAt || null));
 
     const questionList = assigned.map((item, idx) => {
       const itemKey = item._id.toString();
@@ -1919,21 +2215,17 @@ export const getMyAssignedQuestion = async (req, res, next) => {
         title: item.title,
         difficulty: item.difficulty,
         marks: item.marks,
-        compilerAllowed: itemProg ? itemProg.compilerAllowed : progress.compilerAllowed,
-        isCompleted: itemProg ? itemProg.isCompleted : progress.status === "completed",
-        attemptCount: itemProg ? itemProg.conceptualAttemptsCount : 0,
+        compilerAllowed: Boolean(
+          itemProg?.compilerAllowed || (assigned.length === 1 && progress.compilerAllowed)
+        ),
+        isCompleted: itemProg
+          ? Boolean(itemProg.isCompleted)
+          : isCompletedProgressStatus(progress.status),
+        attemptCount: itemProg ? (itemProg.conceptualAttemptsCount || 0) : 0,
+        conceptualStatus: itemProg?.conceptualStatus || "pending",
+        status: itemProg?.status || "not_started",
       };
     });
-
-    const previousAttempts = await ExamAnswerSubmission.find({
-      examId,
-      studentId,
-      questionId: q._id,
-    })
-      .sort({ attemptNumber: -1 })
-      .lean();
-
-    const latestSub = previousAttempts[0] || null;
 
     res.status(200).json({
       exam: {
@@ -1946,17 +2238,21 @@ export const getMyAssignedQuestion = async (req, res, next) => {
         questionsPerStudent: exam.questionsPerStudent || assigned.length,
       },
       progress: {
-        status: progress.status,
-        conceptualStatus: qProg?.conceptualStatus || progress.conceptualStatus || (latestSub ? latestSub.status : "pending"),
+        status: qStatus,
+        conceptualStatus: qConceptualStatus,
         conceptualAttemptsCount: qAttemptsCount,
         compilerAllowed: isQCompilerAllowed,
         lastConceptualAnswer: lastQAnswer,
+        answerDraftVersion: qAnswerVersion,
+        lastAnswerSavedAt: qLastAnswerSavedAt,
         lastAIEvaluation: lastQEvaluation,
-        facultyDecision: qProg?.facultyDecision || progress.facultyDecision || latestSub?.facultyDecision || "pending",
-        facultyFeedback: qProg?.facultyFeedback || progress.facultyFeedback || latestSub?.facultyFeedback || "",
-        submittedAt: qProg?.submittedAt || progress.submittedAt || latestSub?.submittedAt || null,
-        evaluatedAt: qProg?.evaluatedAt || progress.evaluatedAt || latestSub?.evaluatedAt || null,
+        facultyDecision: qFacultyDecision,
+        facultyFeedback: qFacultyFeedback,
+        submittedAt: qSubmittedAt,
+        evaluatedAt: qEvaluatedAt,
         currentCode: qCode,
+        codeDraftVersion: qCodeVersion,
+        lastCodeSavedAt: qLastCodeSavedAt,
         isCompleted: isQCompleted,
       },
       previousAttempts,
@@ -1984,6 +2280,776 @@ export const getMyAssignedQuestion = async (req, res, next) => {
 };
 
 /**
+ * Autosave student's code draft in C code editor.
+ * Supports questionId for multi-question assignments and monotonic versioning to prevent out-of-order writes.
+ */
+export const autosaveCodeDraft = async (req, res, next) => {
+  try {
+    const { examId } = req.params;
+    const studentId = req.user.userId;
+    const { code, questionId, version } = req.body;
+
+    if (code === undefined || code === null) {
+      return res.status(400).json({ message: "Code content is required for draft autosave." });
+    }
+
+    // Verify authenticated student is enrolled, exam is active, and deadline has not expired
+    let exam = null;
+    if (
+      (mongoose.connection && mongoose.connection.readyState === 1) ||
+      Exam.findById !== mongoose.Model.findById
+    ) {
+      if (mongoose.connection && mongoose.connection.readyState === 1) {
+        exam = await Exam.findOne({
+          _id: examId,
+          participatingStudents: studentId,
+        }).select("status title startedAt durationMinutes completedAt examType participatingStudents");
+        if (!exam) {
+          return res.status(403).json({ message: "Exam is not active or you are not enrolled." });
+        }
+      } else {
+        const examQuery = Exam.findById(examId);
+        exam =
+          typeof examQuery?.select === "function"
+            ? await examQuery.select(
+                "status title startedAt durationMinutes completedAt examType participatingStudents"
+              )
+            : await examQuery;
+        if (!exam) {
+          return res.status(404).json({ message: "Exam not found." });
+        }
+      }
+    }
+
+    const progress = await StudentExamProgress.findOne({ examId, studentId });
+    if (!progress) {
+      return res.status(404).json({ message: "Progress record not found." });
+    }
+
+    if (
+      progress.status === "completed" ||
+      progress.status === "successfully_completed" ||
+      progress.status === "time_expired"
+    ) {
+      return res.status(403).json({
+        message: "Examination has already been completed. Code edits are locked.",
+        isCompleted: true,
+      });
+    }
+
+    const timingCheck = validateExamAccessAndTiming({
+      exam,
+      progress,
+      studentId,
+      isViva: false,
+    });
+    if (!timingCheck.ok) {
+      return res.status(timingCheck.status).json(timingCheck.body);
+    }
+
+    // Verify question ownership if questionId is provided (when Mongoose is connected)
+    if (questionId && mongoose.connection && mongoose.connection.readyState === 1) {
+      const allocation = await ExamAllocation.findOne({ examId, studentId }).lean();
+      if (allocation) {
+        const assignedIds = (allocation.assignedQuestionIds || []).map((id) => id.toString());
+        if (allocation.questionId) {
+          assignedIds.push(allocation.questionId.toString());
+        }
+        if (assignedIds.length > 0 && !assignedIds.includes(questionId.toString())) {
+          return res.status(403).json({ message: "Question is not assigned to your account." });
+        }
+      }
+    }
+
+    const incomingVersion = typeof version === "number" ? version : null;
+    const now = new Date();
+    const useAtomicProgressUpdate =
+      typeof StudentExamProgress.findOneAndUpdate === "function" &&
+      (mongoose.connection?.readyState === 1 ||
+        StudentExamProgress.findOneAndUpdate !== mongoose.Model.findOneAndUpdate);
+
+    if (useAtomicProgressUpdate) {
+      if (questionId) {
+        const qKey = questionId.toString();
+        const rawExisting = progress.questionProgress?.get
+          ? progress.questionProgress.get(qKey)
+          : progress.questionProgress?.[qKey];
+        const existing = rawExisting?.toObject ? rawExisting.toObject() : (rawExisting || { questionId });
+
+        if (existing.isCompleted || existing.status === "submission_pending") {
+          return res.status(403).json({
+            message: "This question has already been submitted. Code edits are locked.",
+            alreadySubmitted: Boolean(existing.isCompleted),
+          });
+        }
+
+        const currentVersion = existing.codeDraftVersion ?? 0;
+        if (incomingVersion !== null && incomingVersion < currentVersion) {
+          return res.status(200).json({
+            success: true,
+            message: "Ignored stale code draft version.",
+            savedVersion: currentVersion,
+            stale: true,
+          });
+        }
+
+        if (existing.currentCode === code && (incomingVersion === null || incomingVersion === currentVersion)) {
+          return res.status(200).json({
+            success: true,
+            message: "Code draft already up to date.",
+            savedAt: existing.lastCodeSavedAt || now,
+            version: currentVersion,
+            unchanged: true,
+          });
+        }
+
+        const nextVersion = incomingVersion !== null ? incomingVersion : currentVersion + 1;
+        const filter = {
+          examId,
+          studentId,
+          status: { $nin: ["completed", "successfully_completed", "time_expired"] },
+          [`questionProgress.${qKey}.isCompleted`]: { $ne: true },
+          [`questionProgress.${qKey}.status`]: { $ne: "submission_pending" },
+        };
+        if (incomingVersion !== null) {
+          filter.$or = [
+            { [`questionProgress.${qKey}.codeDraftVersion`]: { $exists: false } },
+            { [`questionProgress.${qKey}.codeDraftVersion`]: { $lte: incomingVersion } },
+          ];
+        }
+
+        const updated = await StudentExamProgress.findOneAndUpdate(
+          filter,
+          {
+            $set: {
+              [`questionProgress.${qKey}.questionId`]: questionId,
+              [`questionProgress.${qKey}.currentCode`]: code,
+              [`questionProgress.${qKey}.codeDraftVersion`]: nextVersion,
+              [`questionProgress.${qKey}.lastCodeSavedAt`]: now,
+              currentCode: code,
+              codeDraftVersion: nextVersion,
+              lastCodeSavedAt: now,
+            },
+          },
+          { new: true }
+        );
+
+        if (!updated) {
+          if (incomingVersion !== null) {
+            return res.status(200).json({
+              success: true,
+              message: "Ignored stale or locked code draft version.",
+              savedVersion: currentVersion,
+              stale: true,
+            });
+          }
+          return res.status(403).json({
+            message: "Examination or question is locked. Code edits cannot be saved.",
+            isCompleted: true,
+          });
+        }
+
+        return res.status(200).json({
+          success: true,
+          message: "Code draft saved successfully.",
+          savedAt: now,
+          version: nextVersion,
+        });
+      }
+
+      const currentVersion = progress.codeDraftVersion ?? 0;
+      if (incomingVersion !== null && incomingVersion < currentVersion) {
+        return res.status(200).json({
+          success: true,
+          message: "Ignored stale code draft version.",
+          savedVersion: currentVersion,
+          stale: true,
+        });
+      }
+
+      const nextVersion = incomingVersion !== null ? incomingVersion : currentVersion + 1;
+      const filter = {
+        examId,
+        studentId,
+        status: { $nin: ["completed", "successfully_completed", "time_expired"] },
+      };
+      if (incomingVersion !== null) {
+        filter.$or = [
+          { codeDraftVersion: { $exists: false } },
+          { codeDraftVersion: { $lte: incomingVersion } },
+        ];
+      }
+
+      const updated = await StudentExamProgress.findOneAndUpdate(
+        filter,
+        {
+          $set: {
+            currentCode: code,
+            codeDraftVersion: nextVersion,
+            lastCodeSavedAt: now,
+          },
+        },
+        { new: true }
+      );
+
+      if (!updated) {
+        return res.status(200).json({
+          success: true,
+          message: "Ignored stale code draft version.",
+          savedVersion: currentVersion,
+          stale: true,
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Code draft saved successfully.",
+        savedAt: now,
+        version: nextVersion,
+      });
+    }
+
+    if (questionId) {
+      const qKey = questionId.toString();
+      if (!progress.questionProgress) {
+        progress.questionProgress = new Map();
+      }
+      const rawExisting = progress.questionProgress.get(qKey);
+      const existing = rawExisting?.toObject ? rawExisting.toObject() : (rawExisting || { questionId });
+      if (existing.isCompleted || existing.status === "submission_pending") {
+        return res.status(403).json({
+          message: "This question has already been submitted. Code edits are locked.",
+          alreadySubmitted: Boolean(existing.isCompleted),
+        });
+      }
+
+      const currentVersion = existing.codeDraftVersion ?? 0;
+
+      // Drop stale requests if a newer version was already saved
+      if (incomingVersion !== null && incomingVersion < currentVersion) {
+        return res.status(200).json({
+          success: true,
+          message: "Ignored stale code draft version.",
+          savedVersion: currentVersion,
+          stale: true,
+        });
+      }
+
+      // Skip unnecessary DB write if code and version are unchanged
+      if (existing.currentCode === code && (incomingVersion === null || incomingVersion === currentVersion)) {
+        return res.status(200).json({
+          success: true,
+          message: "Code draft already up to date.",
+          savedAt: existing.lastCodeSavedAt || now,
+          version: currentVersion,
+          unchanged: true,
+        });
+      }
+
+      const nextVersion = incomingVersion !== null ? incomingVersion : currentVersion + 1;
+
+      progress.questionProgress.set(qKey, {
+        ...existing,
+        questionId,
+        currentCode: code,
+        codeDraftVersion: nextVersion,
+        lastCodeSavedAt: now,
+      });
+
+      if (typeof progress.markModified === "function") {
+        progress.markModified("questionProgress");
+      }
+
+      // Also update top-level currentCode
+      progress.currentCode = code;
+      progress.codeDraftVersion = nextVersion;
+      progress.lastCodeSavedAt = now;
+    } else {
+      const currentVersion = progress.codeDraftVersion ?? 0;
+      if (incomingVersion !== null && incomingVersion < currentVersion) {
+        return res.status(200).json({
+          success: true,
+          message: "Ignored stale code draft version.",
+          savedVersion: currentVersion,
+          stale: true,
+        });
+      }
+
+      const nextVersion = incomingVersion !== null ? incomingVersion : currentVersion + 1;
+      progress.currentCode = code;
+      progress.codeDraftVersion = nextVersion;
+      progress.lastCodeSavedAt = now;
+    }
+
+    await progress.save();
+    res.status(200).json({
+      success: true,
+      message: "Code draft saved successfully.",
+      savedAt: now,
+      version: incomingVersion !== null ? incomingVersion : (progress.codeDraftVersion ?? 0),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Log exam security events (e.g., tab switches, window blur, fullscreen exit)
+ */
+export const logExamSecurityEvent = async (req, res, next) => {
+  try {
+    const { examId } = req.params;
+    const studentId = req.user.userId;
+    const { eventType, details, timestamp } = req.body;
+
+    if (!eventType) {
+      return res.status(400).json({ message: "eventType is required." });
+    }
+
+    // Temporary feature flag: If PHASE3_SECURITY_ENABLED is false, do not log or process security events
+    if (!PHASE3_SECURITY_ENABLED) {
+      return res.status(200).json({
+        success: true,
+        message: "Phase 3 security event logging is currently disabled.",
+        disabled: true,
+      });
+    }
+
+    // Save in ExamAuditLog
+    await ExamAuditLog.create({
+      examId,
+      actorId: studentId,
+      actorRole: "student",
+      action: `SECURITY_EVENT_${String(eventType).toUpperCase()}`,
+      details: {
+        eventType,
+        timestamp: timestamp || new Date(),
+        details: details || {},
+      },
+    });
+
+    res.status(200).json({ success: true, message: "Security event recorded." });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Student explicitly concludes/ends their examination.
+ */
+export const endStudentExam = async (req, res, next) => {
+  try {
+    const { examId } = req.params;
+    const studentId = req.user.userId;
+
+    let exam = null;
+    if (
+      (mongoose.connection && mongoose.connection.readyState === 1) ||
+      Exam.findById !== mongoose.Model.findById
+    ) {
+      exam = await Exam.findById(examId).select(
+        "title subject examType status participatingStudents startedAt durationMinutes totalMarks completedAt"
+      );
+
+      if (!exam) {
+        return res.status(404).json({ message: "Exam not found." });
+      }
+
+      // Validate enrollment
+      const isEnrolled = (exam.participatingStudents || []).some(
+        (id) => id.toString() === studentId.toString()
+      );
+      if (!isEnrolled) {
+        return res.status(403).json({ message: "You are not enrolled in this examination." });
+      }
+    }
+
+    const progress = await StudentExamProgress.findOne({ examId, studentId });
+    if (!progress) {
+      return res.status(404).json({ message: "Progress record not found." });
+    }
+
+    // Idempotent completion handling: preserve first terminal completion event
+    if (progress.status === "successfully_completed" || progress.status === "completed") {
+      return res.status(200).json({
+        success: true,
+        message: "Examination was already completed.",
+        status: progress.status,
+        completionReason: progress.completionReason || "all_questions_submitted",
+        completedAt: progress.completedAt || new Date(),
+        examTitle: exam?.title || "Examination",
+        examType: exam?.examType || "internal",
+        isCompleted: true,
+      });
+    }
+
+    // Verify exam has not been ended by faculty or expired
+    if (exam && exam.status === "completed") {
+      progress.status = "completed";
+      progress.completionReason = "faculty_ended";
+      progress.completedAt = exam.completedAt || new Date();
+      await progress.save();
+      return res.status(200).json({
+        success: true,
+        message: "Examination has already been ended by faculty.",
+        status: "completed",
+        completionReason: "faculty_ended",
+        completedAt: progress.completedAt,
+        examTitle: exam.title,
+        examType: exam.examType,
+        isCompleted: true,
+      });
+    }
+
+    const examTimeExpired =
+      exam?.startedAt && exam?.durationMinutes
+        ? Date.now() > new Date(exam.startedAt).getTime() + exam.durationMinutes * 60 * 1000
+        : false;
+    if (examTimeExpired) {
+      return res.status(403).json({
+        message: "Examination time has expired.",
+        isTimeExpired: true,
+      });
+    }
+
+    // Verify all assigned questions have successful submissions when allocation exists
+    let finalScore = progress.finalScore || 0;
+    if (
+      (mongoose.connection && mongoose.connection.readyState === 1) ||
+      ExamAllocation.findOne !== mongoose.Model.findOne
+    ) {
+      const alloc = await ExamAllocation.findOne({ examId, studentId })
+        .populate("questionId")
+        .populate("assignedQuestionIds")
+        .lean();
+      if (alloc) {
+        const assigned =
+          alloc.assignedQuestionIds?.length > 0
+            ? alloc.assignedQuestionIds
+            : alloc.questionId
+            ? [alloc.questionId]
+            : [];
+        if (assigned.length > 0) {
+          let submittedCount = 0;
+          let totalScore = 0;
+          for (const qItem of assigned) {
+            const qKey = qItem._id.toString();
+            const rawP = progress.questionProgress?.get
+              ? progress.questionProgress.get(qKey)
+              : progress.questionProgress?.[qKey];
+            const p = rawP?.toObject ? rawP.toObject() : rawP;
+            if (p && p.isCompleted) {
+              submittedCount += 1;
+              totalScore += Number(p.score ?? qItem.marks ?? 100);
+            }
+          }
+          if (submittedCount < assigned.length) {
+            return res.status(400).json({
+              message: `Cannot finish exam: ${assigned.length - submittedCount} assigned question(s) are still pending submission.`,
+              submittedQuestionCount: submittedCount,
+              assignedQuestionCount: assigned.length,
+              pendingQuestionsCount: assigned.length - submittedCount,
+            });
+          }
+          finalScore = totalScore;
+        }
+      }
+    }
+
+    // Mark as completed (Condition 2: all_questions_submitted)
+    progress.status = "successfully_completed";
+    progress.completionReason = "all_questions_submitted";
+    progress.completedAt = new Date();
+    progress.finalScore = finalScore;
+    await progress.save();
+
+    await ExamAuditLog.create({
+      examId,
+      actorId: studentId,
+      actorRole: "student",
+      action: "STUDENT_ENDED_EXAMINATION",
+      details: {
+        completedAt: progress.completedAt,
+        completionReason: "all_questions_submitted",
+        examTitle: exam?.title || "Examination",
+        examType: exam?.examType || "internal",
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Examination completed successfully.",
+      status: "successfully_completed",
+      completionReason: "all_questions_submitted",
+      completedAt: progress.completedAt,
+      examTitle: exam?.title || "Examination",
+      examType: exam?.examType || "internal",
+      isCompleted: true,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Condition 3: Automatic Exam Time-Expiry Workflow.
+ * Idempotently evaluates latest available code for every uncompleted assigned question,
+ * saves actual execution results, and finalizes the student's exam with completionReason = "time_expired".
+ */
+export const expireStudentExam = async (req, res, next) => {
+  try {
+    const { examId } = req.params;
+    const studentId = req.user.userId;
+
+    const exam = await Exam.findById(examId).select(
+      "title subject examType status participatingStudents startedAt durationMinutes totalMarks completedAt"
+    );
+    if (!exam) {
+      return res.status(404).json({ message: "Exam not found." });
+    }
+
+    const isEnrolled = (exam.participatingStudents || []).some(
+      (id) => id.toString() === studentId.toString()
+    );
+    if (!isEnrolled) {
+      return res.status(403).json({ message: "You are not enrolled in this examination." });
+    }
+
+    let progress = await StudentExamProgress.findOne({ examId, studentId });
+    if (!progress) {
+      return res.status(404).json({ message: "Progress record not found." });
+    }
+
+    // Preserve any earlier terminal completion event (idempotent)
+    if (progress.status === "successfully_completed" || progress.status === "completed") {
+      return res.status(200).json({
+        success: true,
+        alreadyCompleted: true,
+        status: progress.status,
+        completionReason: progress.completionReason || "time_expired",
+        completedAt: progress.completedAt || new Date(),
+        isCompleted: true,
+      });
+    }
+
+    // Condition 1 precedence: if faculty already ended the exam
+    if (exam.status === "completed") {
+      progress.status = "completed";
+      progress.completionReason = "faculty_ended";
+      progress.completedAt = exam.completedAt || new Date();
+      await progress.save();
+      return res.status(200).json({
+        success: true,
+        status: "completed",
+        completionReason: "faculty_ended",
+        completedAt: progress.completedAt,
+        isCompleted: true,
+      });
+    }
+
+    // Verify exam time has actually expired (2s clock-skew tolerance)
+    if (exam.startedAt && exam.durationMinutes) {
+      const endMs = new Date(exam.startedAt).getTime() + exam.durationMinutes * 60 * 1000;
+      if (Date.now() + 2000 < endMs) {
+        return res.status(400).json({
+          message: "Examination time has not expired yet.",
+          remainingMs: endMs - Date.now(),
+        });
+      }
+    }
+
+    // Acquire atomic lock to prevent duplicate auto-submissions on concurrent timer events
+    if (typeof StudentExamProgress.findOneAndUpdate === "function" && mongoose.connection?.readyState === 1) {
+      const locked = await StudentExamProgress.findOneAndUpdate(
+        {
+          examId,
+          studentId,
+          status: { $nin: ["completed", "successfully_completed"] },
+          expiryProcessing: { $ne: true },
+        },
+        { $set: { expiryProcessing: true } },
+        { new: true }
+      );
+      if (!locked) {
+        const latest = await StudentExamProgress.findOne({ examId, studentId }).lean();
+        return res.status(200).json({
+          success: true,
+          alreadyProcessingOrCompleted: true,
+          status: latest?.status || "completed",
+          completionReason: latest?.completionReason || "time_expired",
+          isCompleted: true,
+        });
+      }
+      progress = locked;
+    } else {
+      if (progress.expiryProcessing) {
+        return res.status(200).json({
+          success: true,
+          alreadyProcessingOrCompleted: true,
+          status: progress.status,
+          completionReason: progress.completionReason || "time_expired",
+          isCompleted: true,
+        });
+      }
+      progress.expiryProcessing = true;
+    }
+
+    const alloc = await ExamAllocation.findOne({ examId, studentId })
+      .populate("questionId")
+      .populate("assignedQuestionIds")
+      .lean();
+
+    const assigned =
+      alloc?.assignedQuestionIds?.length > 0
+        ? alloc.assignedQuestionIds
+        : alloc?.questionId
+        ? [alloc.questionId]
+        : [];
+
+    if (!progress.questionProgress) {
+      progress.questionProgress = new Map();
+    }
+
+    let totalScore = 0;
+    const autoSubmissionResults = [];
+
+    for (const qItem of assigned) {
+      const qKey = qItem._id.toString();
+      const rawQp = progress.questionProgress.get(qKey);
+      const qp = rawQp?.toObject
+        ? rawQp.toObject()
+        : rawQp || { questionId: qItem._id };
+
+      if (qp.isCompleted) {
+        totalScore += Number(qp.score ?? qItem.marks ?? 100);
+        continue;
+      }
+
+      const draftCode =
+        qp.currentCode !== undefined && qp.currentCode !== ""
+          ? qp.currentCode
+          : assigned.length === 1
+          ? progress.currentCode || ""
+          : "";
+
+      if (!draftCode || !String(draftCode).trim()) {
+        // Empty or unavailable code: record time_expired without inventing a submission
+        qp.status = "time_expired";
+        qp.isCompleted = false;
+        progress.questionProgress.set(qKey, qp);
+        autoSubmissionResults.push({
+          questionId: qItem._id,
+          status: "no_code_submitted",
+          allPassed: false,
+        });
+        continue;
+      }
+
+      try {
+        const allTestCases = qItem.testCases || [];
+        const judgeResult = await submissionQueue.enqueue(
+          () =>
+            judgeSubmission({
+              code: draftCode,
+              testCases: allTestCases,
+              problemTitle: qItem.title,
+            }),
+          {
+            userId: studentId,
+            examId,
+            questionId: qItem._id?.toString(),
+            action: "exam_expire",
+          }
+        );
+
+        const allPassed = judgeResult.status === "accepted";
+
+        await ExamCodeSubmission.create({
+          examId,
+          studentId,
+          questionId: qItem._id,
+          code: draftCode,
+          language: "c",
+          status: judgeResult.status,
+          testCasesPassed: judgeResult.testCasesPassed || 0,
+          totalTestCases: judgeResult.totalTestCases || allTestCases.length,
+          testCaseResults: judgeResult.testCaseResults || [],
+          allPassed,
+          executionTime: judgeResult.executionTime || 0,
+          compilerOutput: judgeResult.compilerOutput || "",
+        });
+
+        if (allPassed) {
+          qp.isCompleted = true;
+          qp.completedAt = new Date();
+          qp.score = qItem.marks || 100;
+          qp.status = "completed";
+          totalScore += qp.score;
+        } else {
+          qp.isCompleted = false;
+          qp.status = "test_cases_failed";
+        }
+        progress.questionProgress.set(qKey, qp);
+        autoSubmissionResults.push({
+          questionId: qItem._id,
+          status: judgeResult.status,
+          allPassed,
+          testCasesPassed: judgeResult.testCasesPassed || 0,
+          totalTestCases: judgeResult.totalTestCases || allTestCases.length,
+        });
+      } catch (judgeErr) {
+        // Judge/Piston failed: record error/pending status without falsely reporting success
+        qp.isCompleted = false;
+        qp.status = "evaluation_pending";
+        progress.questionProgress.set(qKey, qp);
+        autoSubmissionResults.push({
+          questionId: qItem._id,
+          status: "evaluation_error",
+          allPassed: false,
+          error: judgeErr.message,
+        });
+      }
+    }
+
+    if (typeof progress.markModified === "function") {
+      progress.markModified("questionProgress");
+    }
+
+    progress.status = "completed";
+    progress.completionReason = "time_expired";
+    progress.completedAt = new Date();
+    progress.expiryProcessing = false;
+    progress.finalScore = totalScore;
+    await progress.save();
+
+    await ExamAuditLog.create({
+      examId,
+      actorId: studentId,
+      actorRole: "student",
+      action: "STUDENT_EXAM_TIME_EXPIRED",
+      details: {
+        completedAt: progress.completedAt,
+        autoSubmissionResults,
+        finalScore: totalScore,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Examination time expired. Available code has been evaluated and finalized.",
+      status: "completed",
+      completionReason: "time_expired",
+      completedAt: progress.completedAt,
+      finalScore: totalScore,
+      autoSubmissionResults,
+      isCompleted: true,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
  * Autosave student's conceptual answer draft in Notepad.
  * Supports optional questionId for multi-question assignments.
  */
@@ -1991,32 +3057,244 @@ export const autosaveAnswerDraft = async (req, res, next) => {
   try {
     const { examId } = req.params;
     const studentId = req.user.userId;
-    const { answerText, questionId } = req.body;
+    const { answerText, questionId, version } = req.body;
+
+    if (answerText === undefined || answerText === null) {
+      return res.status(400).json({ message: "Answer content is required for draft autosave." });
+    }
+
+    // Verify authenticated student is enrolled and exam is active (when Mongoose is connected)
+    if (mongoose.connection && mongoose.connection.readyState === 1) {
+      const exam = await Exam.findOne({
+        _id: examId,
+        participatingStudents: studentId,
+      }).select("status title");
+
+      if (!exam) {
+        return res.status(403).json({ message: "Exam is not active or you are not enrolled." });
+      }
+      if (exam.status === "completed") {
+        return res.status(403).json({
+          message: "Examination has been ended by faculty. Code edits are locked.",
+          isCompleted: true,
+          facultyEndedExam: true,
+        });
+      }
+      if (exam.status !== "in_progress") {
+        return res.status(403).json({ message: "Exam is not active or you are not enrolled." });
+      }
+    }
 
     const progress = await StudentExamProgress.findOne({ examId, studentId });
     if (!progress) {
       return res.status(404).json({ message: "Progress record not found." });
     }
 
-    progress.lastConceptualAnswer = answerText || "";
-    progress.status = "answer_in_progress";
+    if (
+      progress.status === "completed" ||
+      progress.status === "successfully_completed" ||
+      progress.status === "time_expired"
+    ) {
+      return res.status(403).json({
+        message: "Examination has already been completed. Notepad edits are locked.",
+        isCompleted: true,
+      });
+    }
+
+    // Verify question ownership if questionId is provided (when Mongoose is connected)
+    if (questionId && mongoose.connection && mongoose.connection.readyState === 1) {
+      const allocation = await ExamAllocation.findOne({ examId, studentId }).lean();
+      if (allocation) {
+        const assignedIds = (allocation.assignedQuestionIds || []).map((id) => id.toString());
+        if (allocation.questionId) {
+          assignedIds.push(allocation.questionId.toString());
+        }
+        if (assignedIds.length > 0 && !assignedIds.includes(questionId.toString())) {
+          return res.status(403).json({ message: "Question is not assigned to your account." });
+        }
+      }
+    }
+
+    const incomingVersion = typeof version === "number" ? version : null;
+    const now = new Date();
+    const textValue = String(answerText);
+
+    const ALLOWED_DRAFT_TRANSITION_STATUSES = new Set([
+      "not_started",
+      "instructions_acknowledged",
+      "question_assigned",
+      "notepad_pending",
+      "notepad_correction_required",
+      "correction_required",
+      "answer_in_progress",
+    ]);
+
+    const canTransitionToAnswerInProgress = (status, isCompleted = false) => {
+      if (isCompleted) return false;
+      if (!status) return true;
+      return ALLOWED_DRAFT_TRANSITION_STATUSES.has(status);
+    };
+
+    let savedVersion = progress.answerDraftVersion ?? 0;
+    const useAtomicAnswerUpdate =
+      typeof StudentExamProgress.findOneAndUpdate === "function" &&
+      (mongoose.connection?.readyState === 1 ||
+        StudentExamProgress.findOneAndUpdate !== mongoose.Model.findOneAndUpdate);
+
+    if (useAtomicAnswerUpdate) {
+      if (questionId) {
+        const qKey = questionId.toString();
+        const rawExisting = progress.questionProgress?.get
+          ? progress.questionProgress.get(qKey)
+          : progress.questionProgress?.[qKey];
+        const existing = rawExisting?.toObject ? rawExisting.toObject() : (rawExisting || {});
+        const currentVersion = existing.answerDraftVersion ?? 0;
+
+        if (incomingVersion !== null && incomingVersion < currentVersion) {
+          return res.status(200).json({
+            success: true,
+            message: "Ignored stale answer draft version.",
+            savedVersion: currentVersion,
+            stale: true,
+          });
+        }
+
+        const nextVersion = incomingVersion !== null ? incomingVersion : currentVersion + 1;
+        savedVersion = nextVersion;
+
+        const setFields = {
+          [`questionProgress.${qKey}.questionId`]: questionId,
+          [`questionProgress.${qKey}.lastConceptualAnswer`]: textValue,
+          [`questionProgress.${qKey}.answerDraftVersion`]: nextVersion,
+          [`questionProgress.${qKey}.lastAnswerSavedAt`]: now,
+          lastConceptualAnswer: textValue,
+          answerDraftVersion: nextVersion,
+          lastAnswerSavedAt: now,
+        };
+        if (canTransitionToAnswerInProgress(existing.status, Boolean(existing.isCompleted))) {
+          setFields[`questionProgress.${qKey}.status`] = "answer_in_progress";
+        }
+        if (canTransitionToAnswerInProgress(progress.status)) {
+          setFields.status = "answer_in_progress";
+        }
+
+        const filter = {
+          examId,
+          studentId,
+          status: { $nin: ["completed", "successfully_completed", "time_expired"] },
+          [`questionProgress.${qKey}.isCompleted`]: { $ne: true },
+        };
+        if (incomingVersion !== null) {
+          filter.$or = [
+            { [`questionProgress.${qKey}.answerDraftVersion`]: { $exists: false } },
+            { [`questionProgress.${qKey}.answerDraftVersion`]: { $lte: incomingVersion } },
+          ];
+        }
+
+        const updatedProgress = await StudentExamProgress.findOneAndUpdate(
+          filter,
+          { $set: setFields },
+          { new: true }
+        );
+        if (!updatedProgress) {
+          return res.status(200).json({
+            success: true,
+            message: "Ignored stale answer draft version.",
+            savedVersion: currentVersion,
+            stale: true,
+          });
+        }
+
+        return res.status(200).json({
+          success: true,
+          message: "Draft saved.",
+          savedAt: now,
+          version: savedVersion,
+          questionId: questionId || null,
+          progress: updatedProgress,
+        });
+      }
+    }
 
     if (questionId) {
       const qKey = questionId.toString();
       if (!progress.questionProgress) {
         progress.questionProgress = new Map();
       }
-      const existing = progress.questionProgress.get(qKey) || {};
+      const rawExisting = progress.questionProgress.get(qKey);
+      const existing = rawExisting?.toObject ? rawExisting.toObject() : (rawExisting || {});
+      const currentVersion = existing.answerDraftVersion ?? 0;
+
+      // Drop stale requests if a newer version was already saved
+      if (incomingVersion !== null && incomingVersion < currentVersion) {
+        return res.status(200).json({
+          success: true,
+          message: "Ignored stale answer draft version.",
+          savedVersion: currentVersion,
+          stale: true,
+        });
+      }
+
+      const nextVersion = incomingVersion !== null ? incomingVersion : currentVersion + 1;
+      savedVersion = nextVersion;
+
+      const nextQStatus = canTransitionToAnswerInProgress(
+        existing.status,
+        Boolean(existing.isCompleted)
+      )
+        ? "answer_in_progress"
+        : existing.status;
+
       progress.questionProgress.set(qKey, {
         ...existing,
         questionId,
-        lastConceptualAnswer: answerText || "",
-        status: "answer_in_progress",
+        lastConceptualAnswer: textValue,
+        answerDraftVersion: nextVersion,
+        lastAnswerSavedAt: now,
+        status: nextQStatus,
       });
+
+      if (typeof progress.markModified === "function") {
+        progress.markModified("questionProgress");
+      }
+
+      progress.lastConceptualAnswer = textValue;
+      progress.answerDraftVersion = nextVersion;
+      progress.lastAnswerSavedAt = now;
+      if (canTransitionToAnswerInProgress(progress.status)) {
+        progress.status = "answer_in_progress";
+      }
+    } else {
+      const currentVersion = progress.answerDraftVersion ?? 0;
+      if (incomingVersion !== null && incomingVersion < currentVersion) {
+        return res.status(200).json({
+          success: true,
+          message: "Ignored stale answer draft version.",
+          savedVersion: currentVersion,
+          stale: true,
+        });
+      }
+
+      const nextVersion = incomingVersion !== null ? incomingVersion : currentVersion + 1;
+      savedVersion = nextVersion;
+
+      progress.lastConceptualAnswer = textValue;
+      progress.answerDraftVersion = nextVersion;
+      progress.lastAnswerSavedAt = now;
+      if (canTransitionToAnswerInProgress(progress.status)) {
+        progress.status = "answer_in_progress";
+      }
     }
 
     await progress.save();
-    res.status(200).json({ message: "Draft saved.", progress });
+    res.status(200).json({
+      success: true,
+      message: "Draft saved.",
+      savedAt: now,
+      version: savedVersion,
+      questionId: questionId || null,
+      progress,
+    });
   } catch (error) {
     next(error);
   }
@@ -2039,9 +3317,33 @@ export const submitStudentPaperAnswer = async (req, res, next) => {
       });
     }
 
+    let progress = await StudentExamProgress.findOne({ examId, studentId });
+    if (
+      progress &&
+      (progress.status === "completed" ||
+        progress.status === "successfully_completed" ||
+        progress.status === "time_expired" ||
+        progress.status === "faculty_ended")
+    ) {
+      return res.status(403).json({
+        message: "Examination has already been completed. Notepad submissions are locked.",
+        isCompleted: true,
+      });
+    }
+
     const exam = await Exam.findById(examId);
     if (!exam || exam.status !== "in_progress") {
       return res.status(403).json({ message: "Exam is not currently active." });
+    }
+
+    if (exam.startedAt && exam.durationMinutes) {
+      const endTimeMs = new Date(exam.startedAt).getTime() + Number(exam.durationMinutes) * 60 * 1000;
+      if (Date.now() >= endTimeMs) {
+        return res.status(403).json({
+          message: "Examination time has expired. Notepad submissions are locked.",
+          isCompleted: true,
+        });
+      }
     }
 
     const allocation = await ExamAllocation.findOne({ examId, studentId })
@@ -2074,7 +3376,6 @@ export const submitStudentPaperAnswer = async (req, res, next) => {
       return res.status(404).json({ message: "Allocated question not found." });
     }
 
-    let progress = await StudentExamProgress.findOne({ examId, studentId });
     if (!progress) {
       progress = await StudentExamProgress.create({ examId, studentId });
     }
@@ -2089,16 +3390,37 @@ export const submitStudentPaperAnswer = async (req, res, next) => {
       compilerAllowed: false,
     };
 
-    const maxAttempts = exam.maxConceptualAttempts || 3;
+    // Notepad Attempt Limit Removed: Students have unlimited attempts to write, edit, and resubmit
     const currentAttempts = qProg.conceptualAttemptsCount || 0;
-    if (currentAttempts >= maxAttempts && !qProg.compilerAllowed && !progress.compilerAllowed) {
-      return res.status(403).json({
-        message: `Maximum conceptual attempts (${maxAttempts}) reached for this question. Your submission has been flagged for faculty review.`,
-      });
-    }
-
     const attemptNumber = currentAttempts + 1;
     const submissionTime = new Date();
+
+    // Check for rapid duplicate submission of identical answer within 5 seconds to prevent network double-submits
+    if (mongoose.connection && mongoose.connection.readyState === 1) {
+      try {
+        const existingRecent = await ExamAnswerSubmission.findOne({
+          examId,
+          studentId,
+          questionId: targetQuestion._id,
+          answerText: answerText.trim(),
+        }).sort({ attemptNumber: -1 });
+
+        if (existingRecent && existingRecent.submittedAt) {
+          const timeDiffMs = Date.now() - new Date(existingRecent.submittedAt).getTime();
+          if (timeDiffMs < 5000) {
+            return res.status(200).json({
+              message: "Your answer has been submitted and is waiting for faculty evaluation. Please wait until your faculty reviews your answer.",
+              submissionStatus: "Submitted",
+              evaluationStatus: "Awaiting Faculty Evaluation",
+              examStatus: "Waiting for Faculty Approval",
+              compilerAllowed: false,
+              attemptNumber: existingRecent.attemptNumber,
+              submission: existingRecent,
+            });
+          }
+        }
+      } catch (_) {}
+    }
 
     // 1. Save new answer version in ExamAnswerSubmission (audit history preserved)
     const newSubmission = await ExamAnswerSubmission.create({
@@ -2153,7 +3475,6 @@ export const submitStudentPaperAnswer = async (req, res, next) => {
       examStatus: "Waiting for Faculty Approval",
       compilerAllowed: false,
       attemptNumber,
-      maxAttempts,
       submission: newSubmission,
     });
   } catch (error) {
@@ -2246,76 +3567,216 @@ export const facultyEvaluateStudentPaper = async (req, res, next) => {
     }
     await progress.save();
 
-    // Call Gemini AI evaluation service
-    const evaluation = await evaluateConceptualAnswer({
-      question: targetQuestion,
-      studentAnswer: latestSub.answerText,
-      attemptNumber: latestSub.attemptNumber,
-    });
+    const persistEvaluationSuccess = async (evaluation) => {
+      const errorPercentage = evaluation.errorPercentage;
+      const understandingPercentage =
+        evaluation.understandingPercentage ?? Math.max(0, 100 - errorPercentage);
+      const maxMarks = evaluation.maximumMarks ?? (targetQuestion.marks || 10);
+      const marksObtained =
+        evaluation.totalMarks ??
+        Math.round((understandingPercentage / 100) * maxMarks * 10) / 10;
 
-    const errorPercentage = evaluation.errorPercentage;
-    const understandingPercentage = Math.max(0, 100 - errorPercentage);
-
-    const evaluationReport = {
-      ...evaluation,
-      errorPercentage,
-      understandingPercentage,
-      rawScore: understandingPercentage,
-      correctConcepts: evaluation.strengths || [],
-      missingConcepts: evaluation.missingConcepts || [],
-      incorrectConcepts: (evaluation.identifiedIssues || []).map(
-        (i) => `${i.criterion}: ${i.description}`
-      ),
-      suggestions: (evaluation.identifiedIssues || []).map((i) => i.hint).filter(Boolean),
-    };
-
-    // Save evaluation result in MongoDB
-    latestSub.aiEvaluation = evaluationReport;
-    latestSub.status = "evaluated";
-    latestSub.evaluatedAt = new Date();
-    await latestSub.save();
-
-    // Update progress
-    progress.lastAIEvaluation = evaluationReport;
-    progress.conceptualStatus = "evaluated";
-    progress.status = "waiting_faculty_decision";
-    progress.compilerAllowed = false; // Still NOT allowed until faculty clicks "Allow to Code"
-    progress.evaluatedAt = new Date();
-
-    if (progress.questionProgress && progress.questionProgress.get(qKey)) {
-      const qp = progress.questionProgress.get(qKey);
-      qp.lastAIEvaluation = evaluationReport;
-      qp.conceptualStatus = "evaluated";
-      qp.status = "waiting_faculty_decision";
-      qp.compilerAllowed = false;
-      qp.evaluatedAt = new Date();
-      progress.questionProgress.set(qKey, qp);
-    }
-    await progress.save();
-
-    // Audit log
-    await ExamAuditLog.create({
-      examId,
-      actorId: req.user.userId,
-      actorRole: req.user.role || "admin",
-      action: "FACULTY_TRIGGERED_AI_EVALUATION",
-      details: {
-        studentId,
-        questionId: targetQuestion._id,
-        attemptNumber: latestSub.attemptNumber,
+      const evaluationReport = {
+        ...evaluation,
+        status: evaluation.status || "success",
         errorPercentage,
         understandingPercentage,
-      },
+        rawScore: understandingPercentage,
+        totalMarks: marksObtained,
+        maximumMarks: maxMarks,
+        percentage: understandingPercentage,
+        isFallback: Boolean(evaluation.isFallback),
+        evaluationSource: evaluation.evaluationSource || (evaluation.isFallback ? "rule_based_fallback" : "gemini"),
+        correctConcepts: evaluation.correctConcepts || evaluation.strengths || [],
+        missingConcepts: evaluation.missingConcepts || [],
+        incorrectConcepts:
+          evaluation.incorrectConcepts && evaluation.incorrectConcepts.length > 0
+            ? evaluation.incorrectConcepts
+            : (evaluation.identifiedIssues || []).map((i) => `${i.criterion}: ${i.description}`),
+        improvementSuggestions:
+          evaluation.improvementSuggestions ||
+          evaluation.suggestions ||
+          (evaluation.identifiedIssues || []).map((i) => i.hint).filter(Boolean),
+        suggestions:
+          evaluation.improvementSuggestions ||
+          evaluation.suggestions ||
+          (evaluation.identifiedIssues || []).map((i) => i.hint).filter(Boolean),
+      };
+
+      latestSub.aiEvaluation = evaluationReport;
+      latestSub.status = "evaluated";
+      latestSub.evaluatedAt = new Date();
+      await latestSub.save();
+
+      // Prevent an older evaluation from overwriting a newer submission's progress/evaluation
+      const freshProgress = await StudentExamProgress.findOne({ examId, studentId });
+      const activeProgress = freshProgress || progress;
+      const existingQp = activeProgress.questionProgress?.get
+        ? activeProgress.questionProgress.get(qKey)
+        : activeProgress.questionProgress?.[qKey];
+      const latestTrackedAttempt =
+        existingQp?.conceptualAttemptsCount ?? activeProgress.conceptualAttemptsCount ?? latestSub.attemptNumber;
+
+      let hasNewerSubmission = latestTrackedAttempt > latestSub.attemptNumber;
+      if (!hasNewerSubmission && mongoose.connection?.readyState === 1) {
+        try {
+          const newerSub = await ExamAnswerSubmission.findOne({
+            examId,
+            studentId,
+            questionId: targetQuestion._id,
+            attemptNumber: { $gt: latestSub.attemptNumber },
+          })
+            .select("_id attemptNumber")
+            .lean();
+          if (newerSub) hasNewerSubmission = true;
+        } catch (_) {}
+      }
+
+      if (!hasNewerSubmission) {
+        activeProgress.lastAIEvaluation = evaluationReport;
+        activeProgress.conceptualStatus = "evaluated";
+        activeProgress.status = "waiting_faculty_decision";
+        activeProgress.compilerAllowed = false;
+        activeProgress.evaluatedAt = new Date();
+
+        if (!activeProgress.questionProgress) {
+          activeProgress.questionProgress = new Map();
+        }
+        const updatedQp = {
+          ...(existingQp || {}),
+          questionId: targetQuestion._id,
+          lastAIEvaluation: evaluationReport,
+          conceptualStatus: "evaluated",
+          status: "waiting_faculty_decision",
+          compilerAllowed: false,
+          evaluatedAt: new Date(),
+        };
+        if (activeProgress.questionProgress.set) {
+          activeProgress.questionProgress.set(qKey, updatedQp);
+        } else {
+          activeProgress.questionProgress[qKey] = updatedQp;
+        }
+        await activeProgress.save();
+      }
+
+      await ExamAuditLog.create({
+        examId,
+        actorId: req.user.userId,
+        actorRole: req.user.role || "admin",
+        action: "FACULTY_TRIGGERED_AI_EVALUATION",
+        details: {
+          studentId,
+          questionId: targetQuestion._id,
+          submissionId: latestSub._id,
+          attemptNumber: latestSub.attemptNumber,
+          errorPercentage,
+          understandingPercentage,
+          isFallback: Boolean(evaluation.isFallback),
+        },
+      });
+
+      return { evaluationReport, errorPercentage, understandingPercentage, maxMarks, marksObtained };
+    };
+
+    const persistEvaluationFailure = async () => {
+      latestSub.status = "submitted";
+      await latestSub.save();
+
+      const freshProgress = await StudentExamProgress.findOne({ examId, studentId });
+      const activeProgress = freshProgress || progress;
+      const existingQp = activeProgress.questionProgress?.get
+        ? activeProgress.questionProgress.get(qKey)
+        : activeProgress.questionProgress?.[qKey];
+      const latestTrackedAttempt =
+        existingQp?.conceptualAttemptsCount ?? activeProgress.conceptualAttemptsCount ?? latestSub.attemptNumber;
+
+      if (latestTrackedAttempt <= latestSub.attemptNumber) {
+        activeProgress.status = "awaiting_faculty_evaluation";
+        activeProgress.conceptualStatus = "submitted";
+        if (activeProgress.questionProgress && activeProgress.questionProgress.get && activeProgress.questionProgress.get(qKey)) {
+          const qp = activeProgress.questionProgress.get(qKey);
+          qp.status = "awaiting_faculty_evaluation";
+          qp.conceptualStatus = "submitted";
+          activeProgress.questionProgress.set(qKey, qp);
+        }
+        await activeProgress.save();
+      }
+    };
+
+    const isAsyncMode = req.query?.async === "true" || req.body?.async === true;
+
+    const queued = aiEvaluationQueue.enqueue({
+      examId,
+      studentId,
+      questionId: targetQuestion._id,
+      submissionId: latestSub._id,
+      attemptNumber: latestSub.attemptNumber,
+      facultyId: req.user.userId,
+      task: ({ retryCount, maxRetries }) =>
+        evaluateConceptualAnswer({
+          question: targetQuestion,
+          studentAnswer: latestSub.answerText,
+          attemptNumber: latestSub.attemptNumber,
+          allowFallback: retryCount >= maxRetries,
+        }),
+      onCompleted: isAsyncMode ? (evalRes) => persistEvaluationSuccess(evalRes) : null,
+      onFailed: isAsyncMode ? () => persistEvaluationFailure() : null,
     });
+
+    if (isAsyncMode) {
+      return res.status(202).json({
+        queued: true,
+        deduplicated: queued.deduplicated,
+        job: queued.job,
+        queueStats: aiEvaluationQueue.getStats(),
+        message: "AI evaluation queued for background processing.",
+      });
+    }
+
+    let evaluation = await queued.promise;
+
+    // If Gemini failed with a non-retryable HTTP/config error (not malformed JSON),
+    // use the rubric-aware fallback rather than failing with 502.
+    if (evaluation.status === "failed" && evaluation.retryable === false) {
+      const fallback = generateConceptualFallback({
+        question: targetQuestion,
+        studentAnswer: latestSub.answerText,
+      });
+      fallback.isFallback = true;
+      fallback.evaluationSource = "rule_based_fallback";
+      fallback.rubricWarnings = [
+        ...(fallback.rubricWarnings || []),
+        `${evaluation.error || "Gemini API unavailable"}; evaluated with rubric-aware fallback.`,
+      ];
+      evaluation = fallback;
+    }
+
+    // Never save fabricated marks if Gemini returned malformed/inconsistent JSON
+    if (evaluation.status === "failed") {
+      await persistEvaluationFailure();
+      return res.status(502).json({
+        message: evaluation.error || "AI evaluation failed or returned an invalid response. Please retry.",
+        retryable: true,
+        rubricWarnings: evaluation.rubricWarnings || [],
+      });
+    }
+
+    const { evaluationReport, errorPercentage, understandingPercentage, maxMarks, marksObtained } =
+      await persistEvaluationSuccess(evaluation);
 
     res.status(200).json({
       message: "AI evaluation completed successfully.",
+      submissionId: latestSub._id,
       studentId: student._id,
       studentName: student.username,
       rollNo: student.rollNo,
+      questionNumber: targetQuestion.questionNumber || "Q1",
       questionTitle: targetQuestion.title,
       questionId: targetQuestion._id,
       conceptualAnswer: latestSub.answerText,
+      marksObtained,
+      totalMarks: maxMarks,
+      correctnessPercentage: understandingPercentage,
       understandingPercentage,
       errorPercentage,
       correctConcepts: evaluationReport.correctConcepts,
@@ -2391,29 +3852,65 @@ export const facultyAuthorizeCompiler = async (req, res, next) => {
     latestSub.facultyId = facultyId;
     await latestSub.save();
 
-    // Update progress
-    progress.compilerAllowed = true;
-    progress.compilerAllowedAt = now;
-    progress.conceptualStatus = "approved";
-    progress.status = "coding_in_progress";
-    progress.facultyDecision = "allow_to_code";
-    progress.facultyDecisionAt = now;
-    progress.facultyId = facultyId;
+    // Update progress atomically when connected/mocked so concurrent student drafts are never clobbered
+    if (
+      typeof StudentExamProgress.findOneAndUpdate === "function" &&
+      (mongoose.connection?.readyState === 1 ||
+        StudentExamProgress.findOneAndUpdate !== mongoose.Model.findOneAndUpdate)
+    ) {
+      const setFields = {
+        compilerAllowed: true,
+        compilerAllowedAt: now,
+        conceptualStatus: "approved",
+        status: "coding_in_progress",
+        facultyDecision: "allow_to_code",
+        facultyDecisionAt: now,
+        facultyId,
+      };
+      if (latestSub.questionId) {
+        const qKey = latestSub.questionId.toString();
+        setFields[`questionProgress.${qKey}.questionId`] = latestSub.questionId;
+        setFields[`questionProgress.${qKey}.compilerAllowed`] = true;
+        setFields[`questionProgress.${qKey}.compilerAllowedAt`] = now;
+        setFields[`questionProgress.${qKey}.conceptualStatus`] = "approved";
+        setFields[`questionProgress.${qKey}.status`] = "compiler_access_granted";
+        setFields[`questionProgress.${qKey}.facultyDecision`] = "allow_to_code";
+        setFields[`questionProgress.${qKey}.facultyDecisionAt`] = now;
+        setFields[`questionProgress.${qKey}.facultyId`] = facultyId;
+      }
+      await StudentExamProgress.findOneAndUpdate(
+        {
+          examId,
+          studentId,
+          status: { $nin: ["completed", "successfully_completed", "time_expired"] },
+        },
+        { $set: setFields },
+        { new: true }
+      );
+    } else {
+      progress.compilerAllowed = true;
+      progress.compilerAllowedAt = now;
+      progress.conceptualStatus = "approved";
+      progress.status = "coding_in_progress";
+      progress.facultyDecision = "allow_to_code";
+      progress.facultyDecisionAt = now;
+      progress.facultyId = facultyId;
 
-    if (latestSub.questionId) {
-      const qKey = latestSub.questionId.toString();
-      if (!progress.questionProgress) progress.questionProgress = new Map();
-      const qp = progress.questionProgress.get(qKey) || { questionId: latestSub.questionId };
-      qp.compilerAllowed = true;
-      qp.compilerAllowedAt = now;
-      qp.conceptualStatus = "approved";
-      qp.status = "compiler_access_granted";
-      qp.facultyDecision = "allow_to_code";
-      qp.facultyDecisionAt = now;
-      qp.facultyId = facultyId;
-      progress.questionProgress.set(qKey, qp);
+      if (latestSub.questionId) {
+        const qKey = latestSub.questionId.toString();
+        if (!progress.questionProgress) progress.questionProgress = new Map();
+        const qp = progress.questionProgress.get(qKey) || { questionId: latestSub.questionId };
+        qp.compilerAllowed = true;
+        qp.compilerAllowedAt = now;
+        qp.conceptualStatus = "approved";
+        qp.status = "compiler_access_granted";
+        qp.facultyDecision = "allow_to_code";
+        qp.facultyDecisionAt = now;
+        qp.facultyId = facultyId;
+        progress.questionProgress.set(qKey, qp);
+      }
+      await progress.save();
     }
-    await progress.save();
 
     // Audit Log
     await ExamAuditLog.create({
@@ -2483,7 +3980,7 @@ export const facultyReturnToNotepad = async (req, res, next) => {
     latestSub.facultyFeedback = feedbackNote;
     await latestSub.save();
 
-    // Update progress
+    // Update progress (compiler remains disabled until faculty explicitly approves)
     progress.compilerAllowed = false;
     progress.conceptualStatus = "correction_required";
     progress.status = "notepad_correction_required";
@@ -2491,11 +3988,15 @@ export const facultyReturnToNotepad = async (req, res, next) => {
     progress.facultyDecisionAt = now;
     progress.facultyId = facultyId;
     progress.facultyFeedback = feedbackNote;
+    if (latestSub.aiEvaluation) {
+      progress.lastAIEvaluation = latestSub.aiEvaluation;
+    }
 
     if (latestSub.questionId) {
       const qKey = latestSub.questionId.toString();
       if (!progress.questionProgress) progress.questionProgress = new Map();
-      const qp = progress.questionProgress.get(qKey) || { questionId: latestSub.questionId };
+      const rawQp = progress.questionProgress.get(qKey);
+      const qp = rawQp?.toObject ? rawQp.toObject() : (rawQp || { questionId: latestSub.questionId });
       qp.compilerAllowed = false;
       qp.conceptualStatus = "correction_required";
       qp.status = "correction_required";
@@ -2503,7 +4004,13 @@ export const facultyReturnToNotepad = async (req, res, next) => {
       qp.facultyDecisionAt = now;
       qp.facultyId = facultyId;
       qp.facultyFeedback = feedbackNote;
+      if (latestSub.aiEvaluation) {
+        qp.lastAIEvaluation = latestSub.aiEvaluation;
+      }
       progress.questionProgress.set(qKey, qp);
+      if (typeof progress.markModified === "function") {
+        progress.markModified("questionProgress");
+      }
     }
     await progress.save();
 
@@ -2552,12 +4059,23 @@ export const getStudentConceptualReport = async (req, res, next) => {
     if (questionId) query.questionId = questionId;
 
     const allAttempts = await ExamAnswerSubmission.find(query)
-      .populate("questionId", "title difficulty problemStatement evaluationRubric")
+      .populate("questionId", "title difficulty problemStatement evaluationRubric questionNumber marks")
       .sort({ attemptNumber: -1 })
       .lean();
 
     const latest = allAttempts[0] || null;
     const progress = await StudentExamProgress.findOne({ examId, studentId }).lean();
+
+    const targetQ = latest?.questionId || (questionId ? await ExamQuestion.findById(questionId).select("title difficulty problemStatement evaluationRubric questionNumber marks").lean() : null);
+    const maxMarks = latest?.aiEvaluation?.maximumMarks || targetQ?.marks || 10;
+    const errPct = latest?.aiEvaluation?.errorPercentage;
+    const undPct = errPct !== undefined && errPct !== null ? Math.max(0, 100 - errPct) : null;
+    const marksObtained =
+      latest?.aiEvaluation?.totalMarks !== undefined && latest?.aiEvaluation?.totalMarks !== null
+        ? latest.aiEvaluation.totalMarks
+        : undPct !== null
+        ? Math.round((undPct / 100) * maxMarks * 10) / 10
+        : null;
 
     res.status(200).json({
       student: {
@@ -2566,6 +4084,10 @@ export const getStudentConceptualReport = async (req, res, next) => {
         rollNo: student.rollNo,
         email: student.email,
       },
+      question: targetQ || null,
+      marksObtained,
+      totalMarks: maxMarks,
+      correctnessPercentage: undPct,
       latestSubmission: latest,
       allAttempts,
       progress: progress || null,
@@ -2578,6 +4100,133 @@ export const getStudentConceptualReport = async (req, res, next) => {
 /**
  * Run C Code in Exam Mode (Tests against VISIBLE sample cases only).
  * Supports optional questionId for multi-question assignments.
+ */
+const activeCodeSubmissionLocks = new Set();
+const activeVivaSubmissionLocks = new Set();
+
+/**
+ * Authoritative server-side validation for exam enrollment, active status, and deadline expiry.
+ * Never trusts client-provided timestamps or completion flags.
+ */
+export const validateExamAccessAndTiming = ({
+  exam,
+  progress,
+  studentId,
+  isViva = false,
+  nowMs = Date.now(),
+}) => {
+  if (
+    exam &&
+    Array.isArray(exam.participatingStudents) &&
+    exam.participatingStudents.length > 0
+  ) {
+    const isEnrolled = exam.participatingStudents.some(
+      (id) => id && id.toString() === studentId.toString()
+    );
+    if (!isEnrolled) {
+      return {
+        ok: false,
+        status: 403,
+        body: { message: "You are not enrolled in this examination." },
+      };
+    }
+  }
+
+  if (progress?.status === "time_expired") {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        message: "Examination time has expired.",
+        isTimeExpired: true,
+        isCompleted: true,
+      },
+    };
+  }
+
+  if (!exam) {
+    return { ok: true, deadlineMs: null, remainingMs: null };
+  }
+
+  if (exam.status === "completed") {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        message: "Examination has been ended by faculty. Submissions are no longer accepted.",
+        isCompleted: true,
+        facultyEndedExam: true,
+      },
+    };
+  }
+
+  if (exam.status !== "in_progress") {
+    return {
+      ok: false,
+      status: 403,
+      body: { message: "Exam is not currently active." },
+    };
+  }
+
+  const useVivaTiming = isViva || exam.examType === "viva";
+  const startSource = useVivaTiming
+    ? progress?.vivaStartedAt || exam.startedAt
+    : exam.startedAt;
+  const startMs = startSource ? new Date(startSource).getTime() : NaN;
+  const durationMins = Number(exam.durationMinutes);
+
+  if (!Number.isFinite(startMs) || !Number.isFinite(durationMins) || durationMins <= 0) {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        message: "Examination timing configuration is invalid or not initialized.",
+      },
+    };
+  }
+
+  const deadlineMs = startMs + durationMins * 60 * 1000;
+  if (nowMs >= deadlineMs) {
+    return {
+      ok: false,
+      status: 403,
+      body: {
+        message: "Examination time has expired.",
+        isTimeExpired: true,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    deadlineMs,
+    remainingMs: deadlineMs - nowMs,
+  };
+};
+
+const handleExamQueueError = (res, queueErr, fallbackMessage) => {
+  if (
+    queueErr?.code === "QUEUE_OVERLOAD" ||
+    queueErr?.code === "QUEUE_TIMEOUT" ||
+    queueErr instanceof ExecutionServiceError
+  ) {
+    const retryAfter = queueErr.retryAfterSeconds || 5;
+    if (typeof res.set === "function") {
+      res.set("Retry-After", String(retryAfter));
+    }
+    return res.status(queueErr.statusCode || 503).json({
+      success: false,
+      message: queueErr.message || fallbackMessage,
+      code: queueErr.code || "EXECUTION_UNAVAILABLE",
+      retryable: true,
+      retryAfterSeconds: retryAfter,
+    });
+  }
+  return null;
+};
+
+/**
+ * Run Code in Exam Mode (Sample/Visible Test Cases ONLY) via shared submissionQueue.
  */
 export const runExamCode = async (req, res, next) => {
   try {
@@ -2592,6 +4241,40 @@ export const runExamCode = async (req, res, next) => {
     const progress = await StudentExamProgress.findOne({ examId, studentId });
     if (!progress) {
       return res.status(403).json({ message: "Progress record not found." });
+    }
+
+    if (progress.status === "completed" || progress.status === "successfully_completed") {
+      return res.status(403).json({
+        message: "Examination has already been completed. Code execution is locked.",
+        isCompleted: true,
+      });
+    }
+
+    let exam = null;
+    if (
+      (mongoose.connection && mongoose.connection.readyState === 1) ||
+      Exam.findById !== mongoose.Model.findById
+    ) {
+      const examQuery = Exam.findById(examId);
+      exam =
+        typeof examQuery?.select === "function"
+          ? await examQuery.select(
+              "status startedAt durationMinutes completedAt examType participatingStudents"
+            )
+          : await examQuery;
+      if (!exam) {
+        return res.status(404).json({ message: "Exam not found." });
+      }
+    }
+
+    const timingCheck = validateExamAccessAndTiming({
+      exam,
+      progress,
+      studentId,
+      isViva: false,
+    });
+    if (!timingCheck.ok) {
+      return res.status(timingCheck.status).json(timingCheck.body);
     }
 
     const allocation = await ExamAllocation.findOne({ examId, studentId })
@@ -2615,8 +4298,12 @@ export const runExamCode = async (req, res, next) => {
       targetQuestion = assigned.find(
         (q) => q._id && q._id.toString() === questionId.toString()
       );
-    }
-    if (!targetQuestion) {
+      if (!targetQuestion) {
+        return res.status(403).json({
+          message: "Unauthorized: This question is not assigned to your account.",
+        });
+      }
+    } else {
       targetQuestion = assigned[0];
     }
 
@@ -2629,31 +4316,66 @@ export const runExamCode = async (req, res, next) => {
       ? progress.questionProgress.get(qKey)
       : progress.questionProgress?.[qKey];
 
-    const isAllowed = progress.compilerAllowed || (qProg && qProg.compilerAllowed);
+    const isAllowed = Boolean(
+      qProg?.compilerAllowed || (assigned.length === 1 && progress.compilerAllowed)
+    );
     if (!isAllowed) {
       return res.status(403).json({
-        message: "Compiler access is locked. You must first achieve an error percentage below 50% on conceptual evaluation.",
+        message: "Compiler access is locked for this question. Your conceptual answer must be evaluated and approved by faculty first.",
       });
     }
 
-    // Run only against VISIBLE test cases
+    // Run only against VISIBLE sample test cases (never expose or execute hidden/private cases)
     const visibleTestCases = (targetQuestion.testCases || []).filter(
-      (tc) => !tc.isHidden
+      (tc) => !tc.isHidden && tc.type !== "hidden"
     );
+
+    if (visibleTestCases.length === 0) {
+      return res.status(400).json({
+        success: false,
+        missingSampleCases: true,
+        message: "No visible sample test cases are configured for this question.",
+        testResults: [],
+        testCasesPassed: 0,
+        totalTestCases: 0,
+      });
+    }
 
     const sampleCases = visibleTestCases.map((tc, idx) => ({
       testCaseNumber: idx + 1,
-      input: tc.input || "",
-      expectedOutput: tc.expectedOutput || "",
+      input: String(tc.input ?? ""),
+      expectedOutput: String(tc.expectedOutput ?? ""),
+      isHidden: false,
       timeLimitMs: tc.timeLimitMs || 3000,
     }));
 
-    const runResult = await runCCode({
-      code,
-      sampleCases,
-      problemTitle: targetQuestion.title,
-      language: "c",
-    });
+    let runResult;
+    try {
+      runResult = await submissionQueue.enqueue(
+        () =>
+          runCCode({
+            code,
+            mode: "sample",
+            problem: targetQuestion,
+            sampleCases,
+            problemTitle: targetQuestion.title,
+          }),
+        {
+          userId: studentId,
+          examId,
+          questionId: targetQuestion._id?.toString(),
+          action: "exam_run",
+        }
+      );
+    } catch (queueErr) {
+      const handled = handleExamQueueError(
+        res,
+        queueErr,
+        "Execution server is currently busy. Please retry in a few seconds."
+      );
+      if (handled) return handled;
+      throw queueErr;
+    }
 
     const diagnostics = runResult.compilerOutput
       ? parseGccDiagnostics(runResult.compilerOutput)
@@ -2674,6 +4396,12 @@ export const runExamCode = async (req, res, next) => {
       passed: tc.status === "passed" || Boolean(tc.passed),
     }));
 
+    // Find first runtime or time limit error message if any
+    const runtimeErrorCase = formattedTestCases.find(
+      (tc) => tc.status === "runtime_error" || tc.status === "time_limit"
+    );
+    const runtimeErrorMessage = runtimeErrorCase ? runtimeErrorCase.error || "Runtime error occurred during execution." : "";
+
     res.status(200).json({
       success: true,
       status: runResult.status,
@@ -2693,6 +4421,7 @@ export const runExamCode = async (req, res, next) => {
       compilerOutput: runResult.compilerOutput || "",
       compilationError:
         runResult.status === "compile_error" ? runResult.compilerOutput : "",
+      runtimeError: runtimeErrorMessage,
       testCases: formattedTestCases,
       results: formattedTestCases,
       runResult: {
@@ -2705,6 +4434,7 @@ export const runExamCode = async (req, res, next) => {
         totalSampleCases: totalSampleCount,
         testCases: formattedTestCases,
         results: formattedTestCases,
+        runtimeError: runtimeErrorMessage,
       },
       diagnostics,
     });
@@ -2727,9 +4457,40 @@ export const submitExamCode = async (req, res, next) => {
       return res.status(400).json({ message: "Code cannot be empty." });
     }
 
-    const progress = await StudentExamProgress.findOne({ examId, studentId });
+    let progress = await StudentExamProgress.findOne({ examId, studentId });
     if (!progress) {
       return res.status(403).json({ message: "Progress record not found." });
+    }
+
+    let exam = null;
+    if (
+      (mongoose.connection && mongoose.connection.readyState === 1) ||
+      Exam.findById !== mongoose.Model.findById
+    ) {
+      exam = await Exam.findById(examId).select(
+        "status completedAt title startedAt durationMinutes examType participatingStudents"
+      );
+      if (!exam) {
+        return res.status(404).json({ message: "Exam not found." });
+      }
+    }
+
+    const timingCheck = validateExamAccessAndTiming({
+      exam,
+      progress,
+      studentId,
+      isViva: false,
+    });
+    if (!timingCheck.ok) {
+      return res.status(timingCheck.status).json(timingCheck.body);
+    }
+
+    if (progress.status === "completed" || progress.status === "successfully_completed") {
+      return res.status(403).json({
+        message: "Examination has already been completed. Code submission is locked.",
+        isCompleted: true,
+        facultyEndedExam: progress.completionReason === "faculty_ended",
+      });
     }
 
     const allocation = await ExamAllocation.findOne({ examId, studentId })
@@ -2767,7 +4528,9 @@ export const submitExamCode = async (req, res, next) => {
       ? progress.questionProgress.get(qKey)
       : progress.questionProgress?.[qKey];
 
-    const isAllowed = progress.compilerAllowed || (qProg && qProg.compilerAllowed);
+    const isAllowed = Boolean(
+      qProg?.compilerAllowed || (assigned.length === 1 && progress.compilerAllowed)
+    );
     const approvedAnswer = await ExamAnswerSubmission.findOne({
       examId,
       studentId,
@@ -2778,29 +4541,142 @@ export const submitExamCode = async (req, res, next) => {
     const hasApprovedConceptual = Boolean(
       approvedAnswer ||
       (qProg && qProg.compilerAllowed && qProg.lastAIEvaluation?.errorPercentage < 50) ||
-      (progress.compilerAllowed && progress.lastAIEvaluation?.errorPercentage < 50)
+      (assigned.length === 1 && progress.compilerAllowed && progress.lastAIEvaluation?.errorPercentage < 50)
     );
 
     if (!isAllowed || !hasApprovedConceptual) {
       return res.status(403).json({
-        message: "Unauthorized code submission: You must complete and pass the conceptual Notepad evaluation before submitting code.",
+        message: "Unauthorized code submission: You must complete and pass the conceptual Notepad evaluation before submitting code for this question.",
       });
     }
 
-    if (progress.status === "completed" || progress.status === "successfully_completed") {
-      return res.status(400).json({
-        message: "You have already completed this examination. Submissions are locked.",
+    const qProgObj = qProg?.toObject ? qProg.toObject() : qProg;
+    if (qProgObj?.isCompleted) {
+      return res.status(409).json({
+        success: false,
+        alreadySubmitted: true,
+        isCompleted: true,
+        message: "You have already submitted a passing solution for this question.",
       });
     }
 
-    const allTestCases = question.testCases || [];
+    const codeLockKey = `${examId}:${studentId}:${qKey}`;
+    if (activeCodeSubmissionLocks.has(codeLockKey) || qProgObj?.status === "submission_pending") {
+      return res.status(409).json({
+        success: false,
+        submissionInProgress: true,
+        message: "A submission for this question is already being evaluated. Please wait.",
+      });
+    }
 
-    // Execute against all test cases in deterministic sandbox
-    const judgeResult = await judgeSubmission({
-      code,
-      testCases: allTestCases,
-      problemTitle: question.title,
-    });
+    activeCodeSubmissionLocks.add(codeLockKey);
+    let dbClaimedCodeLock = false;
+    let persistedCodeSubmission = false;
+
+    const releaseCodeSubmissionLock = async () => {
+      activeCodeSubmissionLocks.delete(codeLockKey);
+      if (!persistedCodeSubmission && dbClaimedCodeLock) {
+        if (
+          typeof StudentExamProgress.updateOne === "function" &&
+          (mongoose.connection?.readyState === 1 ||
+            StudentExamProgress.updateOne !== mongoose.Model.updateOne)
+        ) {
+          await StudentExamProgress.updateOne(
+            {
+              examId,
+              studentId,
+              [`questionProgress.${qKey}.isCompleted`]: { $ne: true },
+              [`questionProgress.${qKey}.status`]: "submission_pending",
+            },
+            {
+              $set: { [`questionProgress.${qKey}.status`]: "coding_in_progress" },
+            }
+          ).catch(() => {});
+        }
+      }
+    };
+
+    try {
+      if (
+        typeof StudentExamProgress.findOneAndUpdate === "function" &&
+        (mongoose.connection?.readyState === 1 ||
+          StudentExamProgress.findOneAndUpdate !== mongoose.Model.findOneAndUpdate)
+      ) {
+        const claimed = await StudentExamProgress.findOneAndUpdate(
+          {
+            examId,
+            studentId,
+            status: { $nin: ["completed", "successfully_completed", "time_expired"] },
+            [`questionProgress.${qKey}.isCompleted`]: { $ne: true },
+            [`questionProgress.${qKey}.status`]: { $ne: "submission_pending" },
+          },
+          {
+            $set: {
+              [`questionProgress.${qKey}.questionId`]: question._id,
+              [`questionProgress.${qKey}.compilerAllowed`]: true,
+              [`questionProgress.${qKey}.status`]: "submission_pending",
+            },
+          },
+          { new: true }
+        );
+        if (!claimed) {
+          return res.status(409).json({
+            success: false,
+            alreadySubmittedOrInProgress: true,
+            message: "Submission is already in progress or already completed for this question.",
+          });
+        }
+        progress = claimed;
+        dbClaimedCodeLock = true;
+      }
+
+      const allTestCases = question.testCases || [];
+
+      // Execute against all test cases in deterministic sandbox via shared submission queue
+      let judgeResult;
+      try {
+        judgeResult = await submissionQueue.enqueue(
+          () =>
+            judgeSubmission({
+              code,
+              testCases: allTestCases,
+              problemTitle: question.title,
+            }),
+          {
+            userId: studentId,
+            examId,
+            questionId: question._id?.toString(),
+            action: "exam_submit",
+          }
+        );
+      } catch (queueErr) {
+        const handled = handleExamQueueError(
+          res,
+          queueErr,
+          "Submission queue is currently busy. Please retry in a few seconds."
+        );
+        if (handled) return handled;
+        throw queueErr;
+      }
+
+      // Re-check if faculty ended the exam while execution was in flight
+      if (
+        (mongoose.connection && mongoose.connection.readyState === 1) ||
+        Exam.findById !== mongoose.Model.findById
+      ) {
+        const latestExamQuery = Exam.findById(examId);
+        const latestExam =
+          typeof latestExamQuery?.select === "function"
+            ? await latestExamQuery.select("status completedAt")
+            : await latestExamQuery;
+        if (latestExam && latestExam.status === "completed") {
+          return res.status(403).json({
+            message: "Examination has been ended by faculty. Submissions are no longer accepted.",
+            isCompleted: true,
+            facultyEndedExam: true,
+          });
+        }
+      }
 
     const allPassed = judgeResult.status === "accepted";
 
@@ -2825,55 +4701,84 @@ export const submitExamCode = async (req, res, next) => {
     if (!progress.questionProgress) {
       progress.questionProgress = new Map();
     }
-    const currentQProg = progress.questionProgress.get(qKey) || {
-      questionId: question._id,
-      compilerAllowed: true,
-    };
+    const rawQProg = progress.questionProgress.get(qKey);
+    const currentQProg = rawQProg?.toObject
+      ? rawQProg.toObject()
+      : rawQProg || {
+          questionId: question._id,
+          compilerAllowed: true,
+        };
     currentQProg.currentCode = code;
 
     if (allPassed) {
       currentQProg.isCompleted = true;
-      currentQProg.completedAt = new Date();
+      currentQProg.completedAt = currentQProg.completedAt || new Date();
       currentQProg.score = question.marks || 100;
       currentQProg.status = "completed";
       progress.questionProgress.set(qKey, currentQProg);
-
-      // Check if ALL assigned questions have approved conceptual evaluation AND completed code
-      const allApprovedAnswers = await ExamAnswerSubmission.find({
-        examId,
-        studentId,
-        isApproved: true,
-      }).select("questionId").lean();
-
-      const approvedQIds = new Set(allApprovedAnswers.map((a) => a.questionId?.toString()));
-
-      const allQuestionsCompleted = assigned.every((qItem) => {
-        const itemKey = qItem._id.toString();
-        const p = progress.questionProgress.get(itemKey);
-        const hasPassedConceptual =
-          approvedQIds.has(itemKey) ||
-          (p && p.compilerAllowed && p.lastAIEvaluation?.errorPercentage < 50) ||
-          (progress.compilerAllowed && progress.lastAIEvaluation?.errorPercentage < 50);
-        const hasPassedCode = itemKey === qKey ? true : Boolean(p && p.isCompleted);
-        return hasPassedConceptual && hasPassedCode;
-      });
-
-      if (allQuestionsCompleted) {
-        progress.status = "successfully_completed";
-        progress.completedAt = new Date();
-        const totalMarks = assigned.reduce(
-          (sum, qItem) => sum + (qItem.marks || 100),
-          0
-        );
-        progress.finalScore = totalMarks;
-      }
     } else {
       currentQProg.status = "test_cases_failed";
-      progress.status = "test_cases_failed";
       progress.questionProgress.set(qKey, currentQProg);
     }
 
+    if (typeof progress.markModified === "function") {
+      progress.markModified("questionProgress");
+    }
+
+    // Count independently completed questions across all assigned questions
+    const assignedQuestionCount = assigned.length || 1;
+    let submittedQuestionCount = 0;
+    for (const qItem of assigned) {
+      const itemKey = qItem._id.toString();
+      const rawItemProg = progress.questionProgress.get(itemKey);
+      const itemProg = rawItemProg?.toObject ? rawItemProg.toObject() : rawItemProg;
+      if (itemProg && itemProg.isCompleted) {
+        submittedQuestionCount += 1;
+      }
+    }
+    const remainingQuestionCount = Math.max(0, assignedQuestionCount - submittedQuestionCount);
+    const facultyEndedExam = Boolean(exam && exam.status === "completed");
+
+    if (facultyEndedExam) {
+      progress.status = "completed";
+      progress.completionReason = "faculty_ended";
+      progress.completedAt = progress.completedAt || exam.completedAt || new Date();
+    } else if (submittedQuestionCount >= assignedQuestionCount) {
+      // Condition 2: All assigned questions submitted — await explicit "Finish Exam" click from student
+      progress.status = "coding_in_progress";
+      progress.finalScore = assigned.reduce(
+        (sum, qItem) => sum + (qItem.marks || 100),
+        0
+      );
+    } else {
+      progress.status = allPassed ? "coding_in_progress" : "test_cases_failed";
+    }
+
     await progress.save();
+    persistedCodeSubmission = true;
+
+    const allQuestionsSubmitted = submittedQuestionCount >= assignedQuestionCount;
+
+    // Find next uncompleted question for "Next Question" navigation
+    const currentIdx = assigned.findIndex((qItem) => qItem._id.toString() === qKey);
+    let nextQuestion = null;
+    if (remainingQuestionCount > 0) {
+      for (let offset = 1; offset <= assigned.length; offset++) {
+        const candidate = assigned[(Math.max(0, currentIdx) + offset) % assigned.length];
+        const candKey = candidate._id.toString();
+        const rawCandProg = progress.questionProgress.get(candKey);
+        const candProg = rawCandProg?.toObject ? rawCandProg.toObject() : rawCandProg;
+        if (!candProg || !candProg.isCompleted) {
+          nextQuestion = {
+            _id: candidate._id,
+            questionNumber: candidate.questionNumber || `Q${((Math.max(0, currentIdx) + offset) % assigned.length) + 1}`,
+            title: candidate.title,
+            compilerAllowed: Boolean(candProg?.compilerAllowed),
+          };
+          break;
+        }
+      }
+    }
 
     // STRICT SANITIZATION: Never leak hidden test cases back to the student
     const sanitized = sanitizeExamCodeSubmissionForStudent(submission);
@@ -2891,19 +4796,27 @@ export const submitExamCode = async (req, res, next) => {
       totalTests: totalCount,
     };
 
-    const isExamCompleted = progress.status === "completed";
+    const isExamCompleted =
+      progress.status === "successfully_completed" || progress.status === "completed";
 
     res.status(201).json({
       success: true,
       message: allPassed
         ? isExamCompleted
-          ? "All assigned questions passed! Examination completed successfully."
-          : "All test cases passed for this question! Please complete any remaining questions."
+          ? "Congratulations! You have successfully completed all assigned questions."
+          : `Successfully Completed ${question.questionNumber || `Question ${Math.max(0, currentIdx) + 1}`}! (${submittedQuestionCount} / ${assignedQuestionCount} Submitted)`
         : "Some test cases failed. Please review your code and try again.",
       status: submission.status,
       allPassed,
       isCompleted: allPassed,
       isExamCompleted,
+      allQuestionsSubmitted,
+      completionReason: progress.completionReason || null,
+      assignedQuestionCount,
+      submittedQuestionCount,
+      remainingQuestionCount,
+      currentQuestionNumber: question.questionNumber || `Question ${Math.max(0, currentIdx) + 1}`,
+      nextQuestion,
       summary,
       testResults: testCasesList,
       testCasesPassed: passedCount,
@@ -2920,6 +4833,9 @@ export const submitExamCode = async (req, res, next) => {
       submission: sanitized,
       diagnostics,
     });
+    } finally {
+      await releaseCodeSubmissionLock();
+    }
   } catch (error) {
     next(error);
   }
@@ -2931,9 +4847,19 @@ export const submitExamCode = async (req, res, next) => {
 export const getStudentExamCompletion = async (req, res, next) => {
   try {
     const { examId } = req.params;
-    const studentId = req.user.userId;
+    const isFacultyOrAdmin = req.user.role === "admin" || req.user.role === "faculty";
+    const studentId =
+      req.params.studentId && isFacultyOrAdmin ? req.params.studentId : req.user.userId;
 
-    const [exam, student, progress, allocation, latestApprovedAnswer, latestAnswerSub, latestCodeSub] =
+    const codeSubsQuery =
+      ExamCodeSubmission.find !== mongoose.Model.find || mongoose.connection?.readyState === 1
+        ? ExamCodeSubmission.find({ examId, studentId }).sort({ submittedAt: -1 }).lean()
+        : ExamCodeSubmission.findOne({ examId, studentId })
+            .sort({ submittedAt: -1 })
+            .lean()
+            .then((doc) => (doc ? [doc] : []));
+
+    const [exam, student, progress, allocation, latestApprovedAnswer, latestAnswerSub, allCodeSubs] =
       await Promise.all([
         Exam.findById(examId).lean(),
         User.findById(studentId).select("username rollNo email").lean(),
@@ -2948,10 +4874,10 @@ export const getStudentExamCompletion = async (req, res, next) => {
         ExamAnswerSubmission.findOne({ examId, studentId })
           .sort({ submittedAt: -1 })
           .lean(),
-        ExamCodeSubmission.findOne({ examId, studentId })
-          .sort({ submittedAt: -1 })
-          .lean(),
+        codeSubsQuery,
       ]);
+
+    const latestCodeSub = Array.isArray(allCodeSubs) && allCodeSubs.length > 0 ? allCodeSubs[0] : null;
 
     if (!exam || !student) {
       return res.status(404).json({ message: "Exam or student record not found." });
@@ -2979,22 +4905,41 @@ export const getStudentExamCompletion = async (req, res, next) => {
       progress?.status !== "completed" &&
       progress?.status !== "successfully_completed";
 
+    let assignedQuestionCount = exam.questionsPerStudent || 1;
+    let submittedQuestionCount = 0;
+    let questionsAttempted = 0;
+    let remainingQuestionCount = 0;
+    let computedCodingScore = progress?.finalScore ?? null;
+    let completionReason = progress?.completionReason || null;
+    let nextQuestion = null;
+    const facultyEndedExam = exam.status === "completed" || progress?.completionReason === "faculty_ended";
+
     if (isViva) {
+      assignedQuestionCount = exam.questionsPerStudent || (Array.isArray(exam.vivaQuestions) ? exam.vivaQuestions.length : 1);
+      questionsAttempted =
+        progress?.vivaResult?.attempted ??
+        (progress?.vivaAnswers?.size ?? 0);
       const isVivaDone =
+        facultyEndedExam ||
         progress?.status === "completed" ||
         progress?.status === "successfully_completed" ||
         Boolean(progress?.vivaResult);
 
       if (isVivaDone) {
         isSuccessfullyCompleted = true;
-        examStatus = "Successfully Completed";
-        message = "You have successfully completed and submitted your Viva examination.";
+        submittedQuestionCount = progress?.vivaResult?.attempted ?? assignedQuestionCount;
+        remainingQuestionCount = Math.max(0, assignedQuestionCount - submittedQuestionCount);
+        completionReason = facultyEndedExam ? "faculty_ended" : (completionReason || "all_questions_submitted");
+        examStatus = facultyEndedExam ? "Examination Ended by Faculty" : "Successfully Completed";
+        message = facultyEndedExam
+          ? "The faculty has ended the examination. Your submitted responses have been recorded."
+          : "You have successfully completed and submitted your Viva examination.";
         conceptualAnswerStatus = "N/A (Viva MCQ Exam)";
         codeSubmissionStatus = "N/A (Viva MCQ Exam)";
         testCasesPassed = progress?.vivaResult?.correct ?? 0;
         testCasesFailed = progress?.vivaResult?.incorrect ?? 0;
         totalTestCases = progress?.vivaResult?.totalQuestions ?? 0;
-        submissionTime = progress?.vivaResult?.submittedAt || progress?.completedAt || null;
+        submissionTime = progress?.vivaResult?.submittedAt || exam.completedAt || progress?.completedAt || null;
       } else {
         isSuccessfullyCompleted = false;
         if (isTimeExpired) {
@@ -3039,39 +4984,48 @@ export const getStudentExamCompletion = async (req, res, next) => {
         latestCodeSub.testCasesPassed === latestCodeSub.totalTestCases
       );
 
-      // Check all questions for multi-question allocations
-      const allQuestionsDone = assigned.length > 0
-        ? assigned.every((q) => {
+      // Count independently submitted/completed questions
+      assignedQuestionCount = assigned.length || exam.questionsPerStudent || 1;
+      submittedQuestionCount = assigned.length > 0
+        ? assigned.filter((q) => {
             const qKey = q._id.toString();
             const p = progress?.questionProgress?.get
               ? progress.questionProgress.get(qKey)
               : progress?.questionProgress?.[qKey];
-            return p && p.isCompleted;
-          })
-        : allTestsPassed;
+            return Boolean(p && p.isCompleted);
+          }).length
+        : allTestsPassed
+        ? 1
+        : 0;
+      remainingQuestionCount = Math.max(0, assignedQuestionCount - submittedQuestionCount);
 
-      // Mandatory validation check
-      if (
-        instructionsAcknowledged &&
-        hasSubmittedConceptual &&
-        hasApprovedConceptual &&
-        compilerAccessGranted &&
-        hasSubmittedCode &&
-        allTestsPassed &&
-        allQuestionsDone &&
-        (progress?.status === "successfully_completed" || progress?.status === "completed")
+      const allQuestionsDone = assignedQuestionCount > 0 && submittedQuestionCount >= assignedQuestionCount;
+      const isTimerExpiredFinal = progress?.completionReason === "time_expired" || (isTimeExpired && !facultyEndedExam);
+
+      // Condition 1: Faculty ended the examination
+      if (facultyEndedExam) {
+        isSuccessfullyCompleted = true;
+        completionReason = "faculty_ended";
+        examStatus = "Examination Ended by Faculty";
+        message = `The examination was ended by the faculty. You successfully submitted ${submittedQuestionCount} out of ${assignedQuestionCount} assigned question(s).`;
+      } else if (
+        // Condition 2: Student submitted all assigned questions AND clicked Finish Exam
+        (progress?.status === "successfully_completed" || progress?.completionReason === "all_questions_submitted") &&
+        allQuestionsDone
       ) {
         isSuccessfullyCompleted = true;
+        completionReason = "all_questions_submitted";
         examStatus = "Successfully Completed";
-        message =
-          "You have successfully completed and submitted your examination. All responses have been logged in the audit registry.";
+        message = "Congratulations! You have successfully completed all assigned questions.";
+      } else if (isTimerExpiredFinal) {
+        // Condition 3: Exam timer expired (with automatic submission & evaluation)
+        isSuccessfullyCompleted = true;
+        completionReason = "time_expired";
+        examStatus = "Time Expired";
+        message = `The examination time expired. ${submittedQuestionCount} out of ${assignedQuestionCount} assigned question(s) were successfully submitted.`;
       } else {
         isSuccessfullyCompleted = false;
-        if (isTimeExpired) {
-          examStatus = "Time Expired";
-          pendingStep = "Examination Time Limit Expired";
-          message = "The examination time has expired before all required steps were completed.";
-        } else if (!instructionsAcknowledged) {
+        if (!instructionsAcknowledged) {
           examStatus = "Not Started";
           pendingStep = "Instructions Acknowledgment";
           message = "You have not acknowledged the examination instructions yet.";
@@ -3103,9 +5057,9 @@ export const getStudentExamCompletion = async (req, res, next) => {
           message =
             "Your submitted solution failed some required test cases. Please correct your code and re-submit.";
         } else {
-          examStatus = "Submission Pending";
-          pendingStep = "Final Submission Finalization";
-          message = "Your submission is pending finalization. Please complete the remaining steps.";
+          examStatus = "In Progress";
+          pendingStep = `Remaining Questions (${remainingQuestionCount})`;
+          message = `You have completed ${submittedQuestionCount} of ${assignedQuestionCount} questions. Please complete the remaining questions.`;
         }
       }
 
@@ -3141,7 +5095,28 @@ export const getStudentExamCompletion = async (req, res, next) => {
         codeSubmissionStatus = "Compiler Locked (Notepad Incomplete)";
       }
 
-      if (latestCodeSub) {
+      if (Array.isArray(allCodeSubs) && allCodeSubs.length > 0 && assigned.length > 0) {
+        const latestByQuestion = new Map();
+        for (const sub of allCodeSubs) {
+          const qIdStr = sub.questionId ? sub.questionId.toString() : "default";
+          if (!latestByQuestion.has(qIdStr)) {
+            latestByQuestion.set(qIdStr, sub);
+          }
+        }
+        if (latestByQuestion.size > 0 && !latestByQuestion.has("default")) {
+          for (const sub of latestByQuestion.values()) {
+            testCasesPassed += sub.testCasesPassed || 0;
+            totalTestCases += sub.totalTestCases || 0;
+          }
+          testCasesFailed = Math.max(0, totalTestCases - testCasesPassed);
+          submissionTime = latestCodeSub?.submittedAt || progress?.completedAt || null;
+        } else if (latestCodeSub) {
+          testCasesPassed = latestCodeSub.testCasesPassed || 0;
+          totalTestCases = latestCodeSub.totalTestCases || 0;
+          testCasesFailed = Math.max(0, totalTestCases - testCasesPassed);
+          submissionTime = latestCodeSub.submittedAt || progress?.completedAt || null;
+        }
+      } else if (latestCodeSub) {
         testCasesPassed = latestCodeSub.testCasesPassed || 0;
         totalTestCases = latestCodeSub.totalTestCases || 0;
         testCasesFailed = Math.max(0, totalTestCases - testCasesPassed);
@@ -3152,13 +5127,91 @@ export const getStudentExamCompletion = async (req, res, next) => {
         testCasesFailed = 0;
         submissionTime = progress?.completedAt || null;
       }
+
+      if (assigned.length > 0) {
+        let scoreSum = 0;
+        for (const qItem of assigned) {
+          const qKey = qItem._id.toString();
+          const rawP = progress?.questionProgress?.get
+            ? progress.questionProgress.get(qKey)
+            : progress?.questionProgress?.[qKey];
+          const p = rawP?.toObject ? rawP.toObject() : rawP;
+          const hasSubForQ =
+            Array.isArray(allCodeSubs) &&
+            allCodeSubs.some((s) => s.questionId && s.questionId.toString() === qKey);
+          const attemptedQ = Boolean(
+            p?.isCompleted ||
+              hasSubForQ ||
+              (p?.currentCode && String(p.currentCode).trim()) ||
+              (p?.lastConceptualAnswer && String(p.lastConceptualAnswer).trim()) ||
+              (p?.status && p.status !== "not_started")
+          );
+          if (attemptedQ) questionsAttempted += 1;
+          if (p?.isCompleted) {
+            scoreSum += Number(p.score ?? qItem.marks ?? 100);
+          }
+        }
+        if (computedCodingScore === null || computedCodingScore === undefined) {
+          computedCodingScore = scoreSum;
+        }
+      } else {
+        questionsAttempted = hasSubmittedCode || hasSubmittedConceptual ? 1 : 0;
+      }
+
+      // Identify the next uncompleted assigned question if exam is still in progress
+      if (!facultyEndedExam && remainingQuestionCount > 0 && assigned.length > 0) {
+        for (let i = 0; i < assigned.length; i++) {
+          const qItem = assigned[i];
+          const qKey = qItem._id.toString();
+          const rawP = progress?.questionProgress?.get
+            ? progress.questionProgress.get(qKey)
+            : progress?.questionProgress?.[qKey];
+          const p = rawP?.toObject ? rawP.toObject() : rawP;
+          if (!p || !p.isCompleted) {
+            nextQuestion = {
+              _id: qItem._id,
+              questionNumber: qItem.questionNumber || `Q${i + 1}`,
+              title: qItem.title,
+              compilerAllowed: Boolean(p?.compilerAllowed),
+            };
+            break;
+          }
+        }
+      }
     }
+
+    const allQuestionsSubmitted = assignedQuestionCount > 0 && submittedQuestionCount >= assignedQuestionCount;
+    const isTimerExpiredFinal = completionReason === "time_expired" || (isTimeExpired && !facultyEndedExam);
+    const hasRemainingQuestions = !isSuccessfullyCompleted && !facultyEndedExam && !isTimerExpiredFinal && remainingQuestionCount > 0;
+    const readyToFinish = !isSuccessfullyCompleted && !facultyEndedExam && !isTimerExpiredFinal && allQuestionsSubmitted;
+
+    const resolvedMarks = isViva
+      ? (progress?.vivaResult?.score ?? null)
+      : (computedCodingScore ?? progress?.finalScore ?? null);
 
     res.status(200).json({
       isSuccessfullyCompleted,
       examStatus,
+      finalExamStatus: examStatus,
       pendingStep,
       message,
+      completionReason,
+      facultyEndedExam,
+      timeExpired: isTimerExpiredFinal,
+      allQuestionsSubmitted,
+      hasRemainingQuestions,
+      readyToFinish,
+      nextQuestion,
+      assignedQuestionCount,
+      questionsAttempted,
+      submittedQuestionCount,
+      remainingQuestionCount,
+      completedAt: exam.completedAt || progress?.completedAt || submissionTime,
+      marks: resolvedMarks,
+      overallScore: resolvedMarks,
+      totalMarks: isViva
+        ? (progress?.vivaResult?.totalMarks ?? exam.totalMarks)
+        : exam.totalMarks,
       studentName: student.username,
       rollNo: student.rollNo || "N/A",
       examTitle: exam.title,
@@ -3166,6 +5219,7 @@ export const getStudentExamCompletion = async (req, res, next) => {
       subject: exam.subject,
       submissionTime,
       conceptualAnswerStatus,
+      aiEvaluationStatus: conceptualAnswerStatus,
       codeSubmissionStatus,
       testCasesPassed,
       testCasesFailed,
@@ -3409,7 +5463,10 @@ export const getVivaExamQuestions = async (req, res, next) => {
         .lean();
     }
 
-    const isCompleted = progress.status === "completed" || exam.status === "completed";
+    const isCompleted =
+      isCompletedProgressStatus(progress.status) ||
+      progress.status === "time_expired" ||
+      exam.status === "completed";
 
     // Strictly redact answers unless exam has completed
     const safeQuestions = questionDocs.map((q, idx) => {
@@ -3476,13 +5533,86 @@ export const saveVivaAnswerDraft = async (req, res, next) => {
       return res.status(400).json({ message: "questionId is required." });
     }
 
+    if (
+      (mongoose.connection && mongoose.connection.readyState === 1) ||
+      Exam.findById !== mongoose.Model.findById
+    ) {
+      const examQuery = Exam.findById(examId);
+      const exam =
+        typeof examQuery?.select === "function"
+          ? await examQuery.select("status")
+          : await examQuery;
+      if (exam && exam.status === "completed") {
+        return res.status(403).json({
+          message: "Examination has been ended by faculty. Draft edits are locked.",
+          isCompleted: true,
+          facultyEndedExam: true,
+        });
+      }
+    }
+
+    const now = new Date();
+    const qKey = String(questionId);
+    const useAtomicVivaUpdate =
+      typeof StudentExamProgress.findOneAndUpdate === "function" &&
+      (mongoose.connection?.readyState === 1 ||
+        StudentExamProgress.findOneAndUpdate !== mongoose.Model.findOneAndUpdate);
+
+    if (useAtomicVivaUpdate) {
+      const updated = await StudentExamProgress.findOneAndUpdate(
+        {
+          examId,
+          studentId,
+          status: { $nin: ["completed", "successfully_completed", "time_expired", "submission_pending"] },
+          $or: [{ vivaResult: null }, { "vivaResult.submittedAt": { $exists: false } }],
+        },
+        {
+          $set: {
+            [`vivaAnswers.${qKey}`]: {
+              questionId: qKey,
+              selectedOption: selectedOption || null,
+              isMarkedForReview: Boolean(isMarkedForReview),
+              answeredAt: now,
+            },
+            lastDraftSavedAt: now,
+          },
+        },
+        { new: true }
+      );
+
+      if (!updated) {
+        const existing = await StudentExamProgress.findOne({ examId, studentId });
+        if (!existing) {
+          return res.status(404).json({ message: "Exam session not found." });
+        }
+        return res.status(400).json({
+          message: "Exam has already been submitted.",
+          isCompleted: true,
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        questionId,
+        savedAt: updated.lastDraftSavedAt || now,
+      });
+    }
+
     let progress = await StudentExamProgress.findOne({ examId, studentId });
     if (!progress) {
       return res.status(404).json({ message: "Exam session not found." });
     }
 
-    if (progress.status === "completed") {
-      return res.status(400).json({ message: "Exam has already been submitted." });
+    if (
+      progress.status === "completed" ||
+      progress.status === "successfully_completed" ||
+      progress.status === "time_expired" ||
+      Boolean(progress.vivaResult?.submittedAt)
+    ) {
+      return res.status(400).json({
+        message: "Exam has already been submitted.",
+        isCompleted: true,
+      });
     }
 
     if (!progress.vivaAnswers) {
@@ -3528,131 +5658,232 @@ export const submitVivaExam = async (req, res, next) => {
       return res.status(404).json({ message: "Exam session not found." });
     }
 
-    // Merge answers if provided in payload
-    if (answers && typeof answers === "object") {
-      if (!progress.vivaAnswers) {
-        progress.vivaAnswers = new Map();
-      }
-      for (const [qId, ans] of Object.entries(answers)) {
-        progress.vivaAnswers.set(String(qId), {
-          questionId: String(qId),
-          selectedOption: ans.selectedOption || null,
-          isMarkedForReview: Boolean(ans.isMarkedForReview),
-          answeredAt: new Date(),
-        });
-      }
+    if (
+      progress.status === "completed" ||
+      progress.status === "successfully_completed" ||
+      Boolean(progress.vivaResult?.submittedAt)
+    ) {
+      return res.status(409).json({
+        success: false,
+        alreadySubmitted: true,
+        isSubmitted: true,
+        isCompleted: true,
+        message: "Viva examination has already been submitted.",
+        result: progress.vivaResult || null,
+      });
     }
 
-    // Fetch assigned questions with correct answer
-    const allocation = await ExamAllocation.findOne({ examId, studentId });
-    let questions = [];
-    if (allocation && allocation.assignedQuestionIds?.length > 0) {
-      questions = await ExamQuestion.find({ _id: { $in: allocation.assignedQuestionIds } }).lean();
-    } else if (allocation && allocation.questionId) {
-      questions = await ExamQuestion.find({ _id: allocation.questionId }).lean();
-    } else {
-      questions = await ExamQuestion.find({ examId }).lean();
+    const timingCheck = validateExamAccessAndTiming({
+      exam,
+      progress,
+      studentId,
+      isViva: true,
+    });
+    if (!timingCheck.ok) {
+      return res.status(timingCheck.status).json(timingCheck.body);
     }
 
-    let correctCount = 0;
-    let incorrectCount = 0;
-    let unansweredCount = 0;
-    let earnedMarks = 0;
-    let penaltyMarks = 0;
-    let totalPossibleMarks = 0;
+    const vivaLockKey = `${examId}:${studentId}`;
+    if (activeVivaSubmissionLocks.has(vivaLockKey) || progress.status === "submission_pending") {
+      return res.status(409).json({
+        success: false,
+        submissionInProgress: true,
+        message: "Viva submission is already being processed. Please wait.",
+      });
+    }
 
-    const savedAnswers = progress.vivaAnswers || new Map();
+    activeVivaSubmissionLocks.add(vivaLockKey);
+    let dbClaimedVivaLock = false;
+    let persistedViva = false;
 
-    for (const q of questions) {
-      const qIdStr = q._id.toString();
-      const qMarks = Number(q.marks) || Number(exam.marksPerQuestion) || 1;
-      const qNegMarks = exam.negativeMarkingEnabled
-        ? (Number(q.negativeMarks) || Number(exam.negativeMarking) || 0)
-        : 0;
+    const releaseVivaLock = async () => {
+      activeVivaSubmissionLocks.delete(vivaLockKey);
+      if (!persistedViva && dbClaimedVivaLock) {
+        if (
+          typeof StudentExamProgress.updateOne === "function" &&
+          (mongoose.connection?.readyState === 1 ||
+            StudentExamProgress.updateOne !== mongoose.Model.updateOne)
+        ) {
+          await StudentExamProgress.updateOne(
+            {
+              examId,
+              studentId,
+              status: "submission_pending",
+            },
+            { $set: { status: "in_progress" } }
+          ).catch(() => {});
+        }
+      }
+    };
 
-      totalPossibleMarks += qMarks;
-
-      const userAnsObj = savedAnswers.get(qIdStr);
-      const selectedOption = userAnsObj?.selectedOption;
-
-      if (!selectedOption || String(selectedOption).trim() === "") {
-        unansweredCount++;
-        continue;
+    try {
+      if (
+        typeof StudentExamProgress.findOneAndUpdate === "function" &&
+        (mongoose.connection?.readyState === 1 ||
+          StudentExamProgress.findOneAndUpdate !== mongoose.Model.findOneAndUpdate)
+      ) {
+        const claimed = await StudentExamProgress.findOneAndUpdate(
+          {
+            examId,
+            studentId,
+            status: { $nin: ["completed", "successfully_completed", "time_expired", "submission_pending"] },
+            $or: [{ vivaResult: null }, { "vivaResult.submittedAt": { $exists: false } }],
+          },
+          { $set: { status: "submission_pending" } },
+          { new: true }
+        );
+        if (!claimed) {
+          return res.status(409).json({
+            success: false,
+            alreadySubmittedOrInProgress: true,
+            isSubmitted: true,
+            message: "Viva submission is already in progress or completed.",
+          });
+        }
+        progress = claimed;
+        dbClaimedVivaLock = true;
       }
 
-      const normSelected = String(selectedOption).trim().toUpperCase();
-      const normCorrect = String(q.correctAnswer || "").trim().toUpperCase();
+      // Merge answers if provided in payload
+      if (answers && typeof answers === "object") {
+        if (!progress.vivaAnswers) {
+          progress.vivaAnswers = new Map();
+        }
+        for (const [qId, ans] of Object.entries(answers)) {
+          progress.vivaAnswers.set(String(qId), {
+            questionId: String(qId),
+            selectedOption: ans.selectedOption || null,
+            isMarkedForReview: Boolean(ans.isMarkedForReview),
+            answeredAt: new Date(),
+          });
+        }
+      }
 
-      let isCorrect = false;
-      if (normCorrect && normCorrect !== "ANSWER NOT PROVIDED") {
-        if (normSelected === normCorrect) {
-          isCorrect = true;
-        } else {
-          // Check matching against option text or ID
-          const matchingOption = (q.options || []).find(
-            (opt) =>
-              opt.optionId?.toUpperCase() === normSelected ||
-              opt.text?.trim().toUpperCase() === normSelected
-          );
-          if (
-            matchingOption &&
-            (matchingOption.optionId?.toUpperCase() === normCorrect ||
-              matchingOption.text?.trim().toUpperCase() === normCorrect)
-          ) {
+      // Fetch assigned questions with correct answer
+      const allocation = await ExamAllocation.findOne({ examId, studentId });
+      let questions = [];
+      if (allocation && allocation.assignedQuestionIds?.length > 0) {
+        questions = await ExamQuestion.find({ _id: { $in: allocation.assignedQuestionIds } }).lean();
+      } else if (allocation && allocation.questionId) {
+        questions = await ExamQuestion.find({ _id: allocation.questionId }).lean();
+      } else {
+        questions = await ExamQuestion.find({ examId }).lean();
+      }
+
+      let correctCount = 0;
+      let incorrectCount = 0;
+      let unansweredCount = 0;
+      let earnedMarks = 0;
+      let penaltyMarks = 0;
+      let totalPossibleMarks = 0;
+
+      const savedAnswers = progress.vivaAnswers || new Map();
+
+      for (const q of questions) {
+        const qIdStr = q._id.toString();
+        const qMarks = Number(q.marks) || Number(exam.marksPerQuestion) || 1;
+        const qNegMarks = exam.negativeMarkingEnabled
+          ? (Number(q.negativeMarks) || Number(exam.negativeMarking) || 0)
+          : 0;
+
+        totalPossibleMarks += qMarks;
+
+        const userAnsObj = savedAnswers.get(qIdStr);
+        const selectedOption = userAnsObj?.selectedOption;
+
+        if (!selectedOption || String(selectedOption).trim() === "") {
+          unansweredCount++;
+          continue;
+        }
+
+        const normSelected = String(selectedOption).trim().toUpperCase();
+        const normCorrect = String(q.correctAnswer || "").trim().toUpperCase();
+
+        let isCorrect = false;
+        if (normCorrect && normCorrect !== "ANSWER NOT PROVIDED") {
+          if (normSelected === normCorrect) {
             isCorrect = true;
+          } else {
+            // Check matching against option text or ID
+            const matchingOption = (q.options || []).find(
+              (opt) =>
+                opt.optionId?.toUpperCase() === normSelected ||
+                opt.text?.trim().toUpperCase() === normSelected
+            );
+            if (
+              matchingOption &&
+              (matchingOption.optionId?.toUpperCase() === normCorrect ||
+                matchingOption.text?.trim().toUpperCase() === normCorrect)
+            ) {
+              isCorrect = true;
+            }
+          }
+        }
+
+        if (isCorrect) {
+          correctCount++;
+          earnedMarks += qMarks;
+        } else {
+          incorrectCount++;
+          if (exam.negativeMarkingEnabled) {
+            penaltyMarks += qNegMarks;
           }
         }
       }
 
-      if (isCorrect) {
-        correctCount++;
-        earnedMarks += qMarks;
-      } else {
-        incorrectCount++;
-        if (exam.negativeMarkingEnabled) {
-          penaltyMarks += qNegMarks;
-        }
-      }
-    }
+      const finalScore = Math.max(0, earnedMarks - penaltyMarks);
+      const percentage = totalPossibleMarks > 0
+        ? Math.round((finalScore / totalPossibleMarks) * 10000) / 100
+        : 0;
 
-    const finalScore = Math.max(0, earnedMarks - penaltyMarks);
-    const percentage = totalPossibleMarks > 0
-      ? Math.round((finalScore / totalPossibleMarks) * 10000) / 100
-      : 0;
+      const prevStatus = progress.status;
+      const prevCompletedAt = progress.completedAt;
+      const prevVivaResult = progress.vivaResult;
 
-    progress.status = "completed";
-    progress.completedAt = new Date();
-    progress.vivaResult = {
-      totalQuestions: questions.length,
-      attempted: correctCount + incorrectCount,
-      correct: correctCount,
-      incorrect: incorrectCount,
-      unanswered: unansweredCount,
-      score: Math.round(finalScore * 100) / 100,
-      totalMarks: totalPossibleMarks,
-      percentage,
-      passed: percentage >= 40,
-      submittedAt: new Date(),
-    };
-
-    await progress.save();
-
-    await ExamAuditLog.create({
-      examId,
-      actorId: studentId,
-      action: "viva_submitted",
-      details: {
-        score: progress.vivaResult.score,
+      progress.status = "completed";
+      progress.completedAt = new Date();
+      progress.vivaResult = {
+        totalQuestions: questions.length,
+        attempted: correctCount + incorrectCount,
+        correct: correctCount,
+        incorrect: incorrectCount,
+        unanswered: unansweredCount,
+        score: Math.round(finalScore * 100) / 100,
         totalMarks: totalPossibleMarks,
         percentage,
-      },
-    });
+        passed: percentage >= 40,
+        submittedAt: new Date(),
+      };
 
-    res.status(200).json({
-      success: true,
-      message: "Viva Examination submitted successfully.",
-      isSubmitted: true,
-    });
+      try {
+        await progress.save();
+      } catch (saveErr) {
+        progress.status = prevStatus === "submission_pending" ? "in_progress" : prevStatus;
+        progress.completedAt = prevCompletedAt;
+        progress.vivaResult = prevVivaResult;
+        throw saveErr;
+      }
+      persistedViva = true;
+
+      await ExamAuditLog.create({
+        examId,
+        actorId: studentId,
+        action: "viva_submitted",
+        details: {
+          score: progress.vivaResult.score,
+          totalMarks: totalPossibleMarks,
+          percentage,
+        },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Viva Examination submitted successfully.",
+        isSubmitted: true,
+      });
+    } finally {
+      await releaseVivaLock();
+    }
   } catch (error) {
     next(error);
   }
@@ -3661,6 +5892,29 @@ export const submitVivaExam = async (req, res, next) => {
 /**
  * Get Viva student exam result.
  */
+/**
+ * Faculty Endpoint: Get AI evaluation background queue status for an exam.
+ */
+export const getAIEvaluationQueueStatus = async (req, res, next) => {
+  try {
+    const { examId } = req.params;
+    const jobs =
+      mongoose.connection?.readyState === 1 || AIEvaluationJob.find !== mongoose.Model.find
+        ? await AIEvaluationJob.find({ examId })
+            .select("idempotencyKey studentId questionId submissionId attemptNumber status retryCount maxRetries startedAt completedAt lastError modelUsed isFallback")
+            .sort({ createdAt: -1 })
+            .lean()
+        : [];
+
+    res.status(200).json({
+      stats: aiEvaluationQueue.getStats(),
+      jobs,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const getVivaStudentResults = async (req, res, next) => {
   try {
     const { examId } = req.params;

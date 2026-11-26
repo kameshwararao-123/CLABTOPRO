@@ -5,7 +5,11 @@
  */
 
 import { executeCCode, checkPistonHealth } from "./pistonService.js";
-import { executeLocalGcc, checkLocalGccHealth } from "./localGccService.js";
+import {
+  executeLocalGcc,
+  executeLocalGccBatch,
+  checkLocalGccHealth,
+} from "./localGccService.js";
 import { evaluateCustomInputExpectedOutput } from "./aiEvaluationService.js";
 import { predictCustomOutputFromSpec, analyzeCustomRunOutput } from "./problemOracleService.js";
 import { sanitizeCompilerOutput, parseGccDiagnostics } from "../utils/compilerParser.js";
@@ -107,6 +111,7 @@ export const judgeSubmission = async ({
     );
   }
 
+  const useLocalBatch = engineHealth.engine === "local_gcc";
   const executeEngine = engineHealth.engine === "piston" ? executeCCode : executeLocalGcc;
   if (engineHealth.fallbackActive) {
     console.log(
@@ -116,9 +121,20 @@ export const judgeSubmission = async ({
     console.log(`[Judge] Evaluating using Piston Docker container at ${engineHealth.url}.`);
   }
 
+  let precompiledBatch = null;
+  if (useLocalBatch) {
+    // Compile once and run all test cases against the single compiled binary
+    precompiledBatch = await executeLocalGccBatch({ code, testCases });
+    if (!precompiledBatch.compileResult.success && precompiledBatch.compileResult.isSystemError) {
+      throw new ExecutionServiceError(precompiledBatch.compileResult.error);
+    }
+  }
+
   if (testCases.length === 0) {
     // If problem has no test cases configured yet, run compilation check
-    const compileCheck = await executeEngine({ code, stdin: "" });
+    const compileCheck = precompiledBatch
+      ? precompiledBatch.compileResult
+      : await executeEngine({ code, stdin: "" });
     if (!compileCheck.success && compileCheck.isSystemError) {
       throw new ExecutionServiceError(compileCheck.error);
     }
@@ -175,15 +191,19 @@ export const judgeSubmission = async ({
         expectedOutput,
         actualOutput: "",
         executionTime: 0,
-        error: "Compilation failed.",
+        error: compilerOutput || "Compilation failed.",
       });
       continue;
     }
 
-    const runResult = await executeEngine({
-      code,
-      stdin: input,
-    });
+    const runResult = precompiledBatch
+      ? !precompiledBatch.compileResult.compiled
+        ? precompiledBatch.compileResult
+        : precompiledBatch.results[i]
+      : await executeEngine({
+          code,
+          stdin: input,
+        });
 
     // Check for fatal system failure
     if (!runResult.success && runResult.isSystemError) {
@@ -195,10 +215,15 @@ export const judgeSubmission = async ({
 
     totalExecutionTime += runResult.executionTimeMs || 0;
 
+    // Capture compilation output / warnings if available
+    if (runResult.compileOutput && !compilerOutput) {
+      compilerOutput = sanitizeCompilerOutput(runResult.compileOutput);
+    }
+
     // 1. Compilation Error
     if (!runResult.compiled) {
       compilationFailed = true;
-      compilerOutput = sanitizeCompilerOutput(runResult.compileOutput);
+      compilerOutput = sanitizeCompilerOutput(runResult.compileOutput) || compilerOutput || "Compilation error.";
       overallStatus = "compile_error";
 
       testCaseResults.push({
@@ -375,6 +400,8 @@ export const runCCode = async ({
   customInput = "",
   customExpectedOutput = "",
   problem = null,
+  sampleCases = null,
+  problemTitle = "",
 }) => {
   if (!code || !code.trim()) {
     throw new Error("Student code cannot be empty");
@@ -589,7 +616,16 @@ export const runCCode = async ({
   }
 
   // Mode 2: Run visible/sample test cases ONLY (never reveal hidden tests)
-  const casesToRun = getVisibleSampleCases(problem);
+  const casesToRun =
+    Array.isArray(sampleCases) && sampleCases.length > 0
+      ? sampleCases.map((tc, idx) => ({
+          testCaseNumber: tc.testCaseNumber || idx + 1,
+          input: String(tc.input ?? ""),
+          expectedOutput: String(tc.expectedOutput ?? ""),
+          isHidden: false,
+          timeLimitMs: tc.timeLimitMs || 3000,
+        }))
+      : getVisibleSampleCases(problem);
 
   // If still no sample tests exist, fall back to a clean custom execution with empty input
   if (casesToRun.length === 0) {
@@ -599,25 +635,14 @@ export const runCCode = async ({
   const judged = await judgeSubmission({
     code,
     testCases: casesToRun,
-    problemTitle: `${problem?.title || "Problem"} (Sample Run)`,
+    problemTitle: `${problemTitle || problem?.title || "Problem"} (Sample Run)`,
   });
-
-  // Preserve warning diagnostics on successful compilation too
-  let finalCompilerOutput = judged.compilerOutput;
-  let finalDiagnostics = judged.diagnostics;
-  if (!finalCompilerOutput && judged.status !== "compile_error") {
-    const firstCheck = await executeEngine({ code, stdin: casesToRun[0].input || "" }).catch(() => null);
-    if (firstCheck?.compileOutput) {
-      finalCompilerOutput = sanitizeCompilerOutput(firstCheck.compileOutput);
-      finalDiagnostics = parseGccDiagnostics(finalCompilerOutput);
-    }
-  }
 
   return {
     mode: "sample",
     status: judged.status,
-    compilerOutput: finalCompilerOutput,
-    diagnostics: finalDiagnostics,
+    compilerOutput: judged.compilerOutput,
+    diagnostics: judged.diagnostics,
     testCasesPassed: judged.testCasesPassed,
     totalTestCases: judged.totalTestCases,
     executionTime: judged.executionTime,

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { getStudentExams, enrollStudentWithCode } from "../../services/examService";
 import Loader from "../../components/common/Loader";
+import useVisibilityPolling from "../../hooks/useVisibilityPolling";
 
 const StudentExams = () => {
   const navigate = useNavigate();
@@ -47,17 +48,17 @@ const StudentExams = () => {
     fetchExams();
   }, [filterType]);
 
-  // Periodic refresh so students automatically see when faculty starts the exam
-  useEffect(() => {
-    const timer = setInterval(() => {
+  // Visibility-aware refresh every 12s so students see when faculty starts an exam without flooding the backend
+  useVisibilityPolling(
+    () => {
       const typeParam = filterType === "all" ? undefined : filterType;
-      getStudentExams(typeParam)
+      return getStudentExams(typeParam)
         .then((data) => setExams(data.exams || []))
         .catch(() => {});
-    }, 4000);
-
-    return () => clearInterval(timer);
-  }, [filterType]);
+    },
+    12000,
+    true
+  );
 
   const handleJoinExam = async (e) => {
     e.preventDefault();
@@ -342,8 +343,16 @@ const StudentExams = () => {
                 <div className="bg-slate-50 p-4 border-t border-slate-100 flex items-center justify-between">
                   <div className="text-xs">
                     <span className="text-slate-400">Your Progress: </span>
-                    <span className="font-semibold text-slate-700 capitalize">
-                      {exam.studentStatus.replace("_", " ")}
+                    <span
+                      className={`font-semibold ${
+                        exam.isCompleted
+                          ? "text-emerald-700 font-bold"
+                          : exam.studentStatus === "in_progress"
+                          ? "text-indigo-600 font-bold"
+                          : "text-slate-700"
+                      }`}
+                    >
+                      {exam.displayProgress || exam.studentStatus?.replace("_", " ") || "Not Started"}
                     </span>
                   </div>
 

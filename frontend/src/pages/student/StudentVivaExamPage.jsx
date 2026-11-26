@@ -27,6 +27,7 @@ import {
   getVivaStudentResults,
 } from "../../services/examService";
 import Loader from "../../components/common/Loader";
+import { isExamProgressCompleted } from "../../utils/examStatus";
 
 const StudentVivaExamPage = () => {
   const { examId } = useParams();
@@ -72,7 +73,7 @@ const StudentVivaExamPage = () => {
       setExam(instData.exam);
 
       const prog = instData.progress;
-      if (prog?.status === "completed" || initialView === "result") {
+      if (isExamProgressCompleted(prog, instData) || initialView === "result") {
         setIsCompleted(true);
         // Load completed results
         const resData = await getVivaExamQuestions(examId);
@@ -270,6 +271,7 @@ const StudentVivaExamPage = () => {
 
   // Submit exam
   const handleFinalSubmit = async (isAuto = false) => {
+    if (submitting || isCompleted) return;
     try {
       setSubmitting(true);
       setErrorMessage("");
@@ -277,6 +279,11 @@ const StudentVivaExamPage = () => {
       setIsCompleted(true);
       setShowSubmitModal(false);
     } catch (err) {
+      if (err.response?.data?.alreadySubmitted || err.response?.data?.isCompleted) {
+        setIsCompleted(true);
+        setShowSubmitModal(false);
+        return;
+      }
       setErrorMessage(err.response?.data?.message || "Failed to submit examination.");
     } finally {
       setSubmitting(false);

@@ -21,8 +21,14 @@ import {
   getMyAssignedQuestion,
   autosaveAnswerDraft,
   submitPaperAnswer,
+  logExamSecurityEvent,
+  endStudentExam,
+  expireStudentExam,
 } from "../../services/examService";
 import Loader from "../../components/common/Loader";
+import { isExamProgressCompleted } from "../../utils/examStatus";
+import useVisibilityPolling from "../../hooks/useVisibilityPolling";
+import { PHASE3_SECURITY_ENABLED } from "../../configs/securityConfig";
 
 const PAPER_TEMPLATE = `1. ALGORITHMIC APPROACH:
 - Step-by-step description of the algorithm:
@@ -50,18 +56,83 @@ const ExamPaperNotepad = () => {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
   const [answerText, setAnswerText] = useState("");
-  const [saveStatus, setSaveStatus] = useState("idle"); // idle | saving | saved
+  const [saveStatus, setSaveStatus] = useState("idle"); // idle | unsaved | saving | saved | failed
+  const [saveError, setSaveError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [isEditingResubmit, setIsEditingResubmit] = useState(false);
+  const isEditingResubmitRef = useRef(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
   const [showQuestionPanel, setShowQuestionPanel] = useState(true);
   const [timeLeftStr, setTimeLeftStr] = useState("");
 
+  // Tab switch & copy-paste security
+  const [tabSwitchCount, setTabSwitchCount] = useState(0);
+  const [showWarningModal, setShowWarningModal] = useState(false);
+  const [warningMessage, setWarningMessage] = useState("");
+  const [endingExam, setEndingExam] = useState(false);
+
   const autosaveTimerRef = useRef(null);
   const currentQId = searchParams.get("questionId");
 
+  // Security: Tab-switch, Page Visibility & Blur Detection during notepad phase
+  useEffect(() => {
+    // If Phase 3 security is disabled, do not attach tab-switch or blur listeners
+    if (!PHASE3_SECURITY_ENABLED) {
+      return;
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        setTabSwitchCount((prev) => {
+          const nextCount = prev + 1;
+          setWarningMessage(
+            `Warning: Tab switching or navigating away is strictly prohibited during exams! Violation #${nextCount} recorded.`
+          );
+          setShowWarningModal(true);
+          logExamSecurityEvent(examId, "notepad_tab_switch_hidden", {
+            switchCount: nextCount,
+          });
+          return nextCount;
+        });
+      }
+    };
+
+    const handleWindowBlur = () => {
+      setTabSwitchCount((prev) => {
+        const nextCount = prev + 1;
+        setWarningMessage(
+          `Warning: Focus lost from the exam environment. Violation #${nextCount} recorded.`
+        );
+        setShowWarningModal(true);
+        logExamSecurityEvent(examId, "notepad_window_blur", {
+          switchCount: nextCount,
+        });
+        return nextCount;
+      });
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("blur", handleWindowBlur);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("blur", handleWindowBlur);
+    };
+  }, [examId]);
+
+  const activeQuestionIdRef = useRef(null);
+  const answersCacheRef = useRef(new Map());
+  const draftVersionRef = useRef(new Map());
+  const dirtyQuestionsRef = useRef(new Set());
+  const answerTextRef = useRef(answerText);
+  answerTextRef.current = answerText;
+  const fetchSeqRef = useRef(0);
+  const isLockedRef = useRef(false);
+
   // Load question, current progress, and answer draft
   const fetchData = async (qId, isSilent = false) => {
+    const reqSeq = ++fetchSeqRef.current;
     try {
       if (!isSilent) {
         setLoading(true);
@@ -69,21 +140,69 @@ const ExamPaperNotepad = () => {
       }
       const params = qId ? { questionId: qId } : currentQId ? { questionId: currentQId } : {};
       const res = await getMyAssignedQuestion(examId, params);
+
+      // Ignore stale responses if a newer fetch or question switch occurred
+      if (reqSeq !== fetchSeqRef.current) {
+        return;
+      }
+
+      if (isExamProgressCompleted(res.progress, res)) {
+        navigate(`/exams/${examId}/completed`, { replace: true });
+        return;
+      }
+
       setData(res);
 
-      const prog = res.progress || {};
-      const isLockedFromEditing =
-        prog.compilerAllowed ||
-        prog.status === "awaiting_faculty_evaluation" ||
-        prog.conceptualStatus === "submitted" ||
-        prog.status === "evaluating" ||
-        prog.status === "waiting_faculty_decision";
+      const loadedQId = res.question?._id ? res.question._id.toString() : null;
+      activeQuestionIdRef.current = loadedQId;
 
-      // Only update local answerText if initial load or if locked (viewing submitted copy)
-      // or if user hasn't typed anything yet
-      if (!isSilent || isLockedFromEditing || !answerText.trim()) {
-        if (prog.lastConceptualAnswer) {
-          setAnswerText(prog.lastConceptualAnswer);
+      const prog = res.progress || {};
+      const thisQProg = (res.questions || []).find((q) => q._id?.toString() === loadedQId);
+      const isThisQCompilerAllowed = Boolean(
+        thisQProg?.compilerAllowed !== undefined ? thisQProg.compilerAllowed : prog.compilerAllowed
+      );
+      const thisQStatus = thisQProg?.status || prog.status;
+      const thisQConceptualStatus = thisQProg?.conceptualStatus || prog.conceptualStatus;
+
+      const isLockedFromEditing =
+        isThisQCompilerAllowed ||
+        ((thisQStatus === "awaiting_faculty_evaluation" ||
+          thisQConceptualStatus === "submitted" ||
+          thisQStatus === "evaluating" ||
+          thisQConceptualStatus === "evaluating" ||
+          thisQStatus === "waiting_faculty_decision") &&
+          !isEditingResubmitRef.current);
+
+      isLockedRef.current = isLockedFromEditing;
+
+      // Sync monotonic version floor from backend
+      if (loadedQId && typeof prog.answerDraftVersion === "number") {
+        const prevVer = draftVersionRef.current.get(loadedQId) || 0;
+        if (prog.answerDraftVersion > prevVer) {
+          draftVersionRef.current.set(loadedQId, prog.answerDraftVersion);
+        }
+      }
+
+      // Restore draft:
+      // - On silent background poll, NEVER overwrite unsaved local typing unless locked by faculty
+      // - On fresh load or question switch (!isSilent), use local unsaved cache if dirty, else backend source of truth
+      if (!isSilent || isLockedFromEditing) {
+        if (loadedQId && dirtyQuestionsRef.current.has(loadedQId) && answersCacheRef.current.has(loadedQId) && !isLockedFromEditing) {
+          const cachedVal = answersCacheRef.current.get(loadedQId);
+          setAnswerText(cachedVal);
+          answerTextRef.current = cachedVal;
+        } else {
+          const serverAnswer = prog.lastConceptualAnswer ?? "";
+          setAnswerText(serverAnswer);
+          answerTextRef.current = serverAnswer;
+          if (loadedQId) {
+            answersCacheRef.current.set(loadedQId, serverAnswer);
+            dirtyQuestionsRef.current.delete(loadedQId);
+          }
+          if (!isSilent) {
+            setSaveStatus(serverAnswer ? "saved" : "idle");
+            setSaveError("");
+          }
         }
       }
 
@@ -91,11 +210,15 @@ const ExamPaperNotepad = () => {
         setSearchParams({ questionId: res.question._id });
       }
     } catch (err) {
+      if (err.response?.data?.isCompleted) {
+        navigate(`/exams/${examId}/completed`, { replace: true });
+        return;
+      }
       if (!isSilent) {
         setErrorMsg(err.response?.data?.message || "Failed to load examination question.");
       }
     } finally {
-      if (!isSilent) {
+      if (!isSilent && reqSeq === fetchSeqRef.current) {
         setLoading(false);
       }
     }
@@ -105,13 +228,10 @@ const ExamPaperNotepad = () => {
     fetchData(currentQId, false);
   }, [examId, currentQId]);
 
-  // Live auto-polling every 4 seconds to detect faculty evaluations & decisions
-  useEffect(() => {
-    const interval = setInterval(() => {
-      fetchData(currentQId, true);
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [examId, currentQId]);
+  // Visibility-aware polling every 12 seconds to detect faculty evaluations & decisions
+  useVisibilityPolling(() => fetchData(currentQId, true), 12000, true);
+
+  const timerExpiredRef = useRef(false);
 
   // Exam Countdown Timer
   useEffect(() => {
@@ -121,12 +241,27 @@ const ExamPaperNotepad = () => {
     const durationMs = data.exam.durationMinutes * 60 * 1000;
     const endTime = startTime + durationMs;
 
-    const updateTimer = () => {
+    const updateTimer = async () => {
       const now = Date.now();
       const diff = endTime - now;
 
       if (diff <= 0) {
         setTimeLeftStr("00:00:00 (Time Up)");
+        if (!timerExpiredRef.current) {
+          timerExpiredRef.current = true;
+          try {
+            if (autosaveTimerRef.current) {
+              clearTimeout(autosaveTimerRef.current);
+              autosaveTimerRef.current = null;
+            }
+            if (answerTextRef.current !== undefined && activeQuestionIdRef.current && !isLockedRef.current) {
+              await triggerAutosave(answerTextRef.current, activeQuestionIdRef.current).catch(() => {});
+            }
+            await expireStudentExam(examId).catch(() => {});
+          } finally {
+            navigate(`/exams/${examId}/completed`, { replace: true });
+          }
+        }
         return;
       }
 
@@ -143,45 +278,116 @@ const ExamPaperNotepad = () => {
     return () => clearInterval(interval);
   }, [data]);
 
-  // Autosave handler
+  // Autosave handler with monotonic versioning and question isolation
   const triggerAutosave = useCallback(
-    async (text) => {
-      if (!text || !text.trim()) return;
+    async (textToSave, qId) => {
+      const targetQuestionId = qId || activeQuestionIdRef.current || data?.question?._id;
+      if (!targetQuestionId || textToSave === undefined || textToSave === null) return;
+      if (isLockedRef.current) return;
+
+      const qKey = targetQuestionId.toString();
+      answersCacheRef.current.set(qKey, textToSave);
+
+      const currentVer = (draftVersionRef.current.get(qKey) || 0) + 1;
+      draftVersionRef.current.set(qKey, currentVer);
+
       try {
         setSaveStatus("saving");
-        await autosaveAnswerDraft(examId, text, data?.question?._id);
-        setSaveStatus("saved");
+        setSaveError("");
+        const res = await autosaveAnswerDraft(examId, textToSave, targetQuestionId, currentVer);
+        if (draftVersionRef.current.get(qKey) === currentVer) {
+          dirtyQuestionsRef.current.delete(qKey);
+          setSaveStatus("saved");
+        }
+        return res;
       } catch (err) {
-        setSaveStatus("idle");
+        if (draftVersionRef.current.get(qKey) === currentVer) {
+          setSaveStatus("failed");
+          setSaveError(err.response?.data?.message || "Save failed");
+        }
+        throw err;
       }
     },
     [examId, data?.question?._id]
   );
 
-  // Debounced Autosave
+  // Flush pending debounced save on unmount (navigating away to Code Editor, Dashboard, etc.)
+  useEffect(() => {
+    return () => {
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+        const activeQ = activeQuestionIdRef.current;
+        if (activeQ && !isLockedRef.current && answerTextRef.current !== undefined) {
+          const qKey = activeQ.toString();
+          const nextVer = (draftVersionRef.current.get(qKey) || 0) + 1;
+          draftVersionRef.current.set(qKey, nextVer);
+          autosaveAnswerDraft(examId, answerTextRef.current, activeQ, nextVer).catch(() => {});
+        }
+      }
+    };
+  }, [examId]);
+
+  // Debounced Autosave (700ms)
   const handleTextChange = (e) => {
     const val = e.target.value;
     setAnswerText(val);
-    setSaveStatus("idle");
+    answerTextRef.current = val;
+    setSaveStatus("unsaved");
+    setSaveError("");
+
+    const currentTargetQId = activeQuestionIdRef.current || data?.question?._id;
+    if (currentTargetQId) {
+      const qKey = currentTargetQId.toString();
+      answersCacheRef.current.set(qKey, val);
+      dirtyQuestionsRef.current.add(qKey);
+    }
 
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(() => {
-      triggerAutosave(val);
-    }, 4000);
+      autosaveTimerRef.current = null;
+      triggerAutosave(val, currentTargetQId).catch(() => {});
+    }, 700);
   };
 
   const handleSelectQuestion = async (qId) => {
-    if (answerText.trim()) {
-      await triggerAutosave(answerText);
+    if (!qId) return;
+    const targetQIdStr = qId.toString();
+    const currentQIdStr = activeQuestionIdRef.current || data?.question?._id?.toString();
+    if (targetQIdStr === currentQIdStr) return;
+
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
     }
-    setSearchParams({ questionId: qId });
+
+    if (currentQIdStr && !isLockedRef.current && answerTextRef.current !== undefined) {
+      answersCacheRef.current.set(currentQIdStr, answerTextRef.current);
+      try {
+        await triggerAutosave(answerTextRef.current, currentQIdStr);
+      } catch {
+        // Keep local cache even if network fails so returning still preserves content
+      }
+    }
+
+    setSearchParams({ questionId: targetQIdStr });
   };
 
   const handleInsertTemplate = () => {
     if (answerText.trim() && !window.confirm("Insert template? Existing content will be prepended.")) {
       return;
     }
-    setAnswerText((prev) => (prev.trim() ? `${PAPER_TEMPLATE}\n\n${prev}` : PAPER_TEMPLATE));
+    const nextVal = answerText.trim() ? `${PAPER_TEMPLATE}\n\n${answerText}` : PAPER_TEMPLATE;
+    setAnswerText(nextVal);
+    answerTextRef.current = nextVal;
+    const currentTargetQId = activeQuestionIdRef.current || data?.question?._id;
+    if (currentTargetQId) {
+      const qKey = currentTargetQId.toString();
+      answersCacheRef.current.set(qKey, nextVal);
+      dirtyQuestionsRef.current.add(qKey);
+    }
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    triggerAutosave(nextVal, currentTargetQId).catch(() => {});
   };
 
   // Student Submits Conceptual Answer (NO automatic AI evaluation, NO auto redirect)
@@ -198,6 +404,8 @@ const ExamPaperNotepad = () => {
 
       const res = await submitPaperAnswer(examId, answerText, data?.question?._id);
       setSuccessMsg(res.message || "Conceptual answer submitted successfully.");
+      isEditingResubmitRef.current = false;
+      setIsEditingResubmit(false);
       await fetchData(data?.question?._id, false);
     } catch (err) {
       setErrorMsg(err.response?.data?.message || "Failed to submit conceptual answer. Please try again.");
@@ -226,28 +434,64 @@ const ExamPaperNotepad = () => {
     );
   }
 
+  if (!data || !data.exam || !data.question) {
+    return <Loader message="Setting up your Paper Writing Notepad..." />;
+  }
+
+  const handleEndExam = async () => {
+    if (
+      !window.confirm(
+        "Are you sure you want to finish and submit your entire examination? You will not be able to return to this exam."
+      )
+    ) {
+      return;
+    }
+
+    try {
+      setEndingExam(true);
+      // Autosave current draft before concluding
+      if (answerTextRef.current !== undefined && activeQuestionIdRef.current && !isLockedRef.current) {
+        if (autosaveTimerRef.current) {
+          clearTimeout(autosaveTimerRef.current);
+          autosaveTimerRef.current = null;
+        }
+        await triggerAutosave(answerTextRef.current, activeQuestionIdRef.current);
+      }
+      await endStudentExam(examId);
+      navigate(`/exams/${examId}/completed`, { replace: true });
+    } catch (err) {
+      setErrorMsg(err.response?.data?.message || "Failed to finalize examination.");
+      setEndingExam(false);
+    }
+  };
+
   const { exam, question, progress } = data;
   const wordCount = answerText.trim() ? answerText.trim().split(/\s+/).length : 0;
   const charCount = answerText.length;
-  const maxAttempts = exam.maxConceptualAttempts || 3;
-  const currentAttempts = progress?.conceptualAttemptsCount || 0;
 
-  // Workflow State Flags
-  const isCompilerUnlocked = Boolean(progress?.compilerAllowed);
+  // Multi-question per-question state: check active question's compilerAllowed
+  const activeQKey = question?._id?.toString();
+  const qProg = data.questions?.find((q) => q._id?.toString() === activeQKey);
+  const isCompilerUnlocked = Boolean(
+    qProg?.compilerAllowed !== undefined ? qProg.compilerAllowed : progress?.compilerAllowed
+  );
+  const currentQStatus = qProg?.status || progress?.status;
+  const currentQConceptualStatus = qProg?.conceptualStatus || progress?.conceptualStatus;
   const isAwaitingFaculty =
     !isCompilerUnlocked &&
-    (progress?.status === "awaiting_faculty_evaluation" ||
-      progress?.conceptualStatus === "submitted" ||
-      progress?.status === "evaluating" ||
-      progress?.conceptualStatus === "evaluating" ||
-      progress?.status === "waiting_faculty_decision");
+    (currentQStatus === "awaiting_faculty_evaluation" ||
+      currentQConceptualStatus === "submitted" ||
+      currentQStatus === "evaluating" ||
+      currentQConceptualStatus === "evaluating" ||
+      currentQStatus === "waiting_faculty_decision");
 
   const isCorrectionRequired =
     !isCompilerUnlocked &&
     !isAwaitingFaculty &&
-    (progress?.status === "notepad_correction_required" ||
-      progress?.conceptualStatus === "correction_required" ||
-      progress?.status === "conceptual_evaluation_failed");
+    (currentQStatus === "notepad_correction_required" ||
+      currentQStatus === "correction_required" ||
+      currentQConceptualStatus === "correction_required" ||
+      currentQStatus === "conceptual_evaluation_failed");
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
@@ -278,13 +522,28 @@ const ExamPaperNotepad = () => {
           <div className="hidden sm:flex items-center gap-1.5 text-xs text-slate-400">
             {saveStatus === "saving" && (
               <span className="text-amber-400 animate-pulse flex items-center gap-1">
-                <Save className="w-3.5 h-3.5" /> Saving draft...
+                <Save className="w-3.5 h-3.5" /> Saving...
               </span>
             )}
             {saveStatus === "saved" && (
               <span className="text-emerald-400 flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5" /> Draft saved
+                <CheckCircle2 className="w-3.5 h-3.5" /> Saved
               </span>
+            )}
+            {saveStatus === "unsaved" && (
+              <span className="text-slate-400 flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-amber-500"></span> Unsaved
+              </span>
+            )}
+            {saveStatus === "failed" && (
+              <button
+                type="button"
+                onClick={() => triggerAutosave(answerTextRef.current, activeQuestionIdRef.current).catch(() => {})}
+                className="text-rose-400 hover:text-rose-300 flex items-center gap-1 underline cursor-pointer"
+                title={saveError || "Failed to save draft. Click to retry."}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" /> Save failed – Retry
+              </button>
             )}
           </div>
 
@@ -303,7 +562,7 @@ const ExamPaperNotepad = () => {
             >
               <Code2 className="w-4 h-4" /> Go to Code Editor
             </button>
-          ) : isAwaitingFaculty ? (
+          ) : isAwaitingFaculty && !isEditingResubmit ? (
             <div className="hidden md:flex items-center gap-1.5 text-xs text-amber-400 bg-amber-950/40 border border-amber-800/40 px-2.5 py-1 rounded-lg font-semibold">
               <span className="relative flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
@@ -316,6 +575,16 @@ const ExamPaperNotepad = () => {
               <span>Compiler: Locked (Faculty Approval Required)</span>
             </div>
           )}
+
+          {/* Conclude Exam Button */}
+          <button
+            onClick={handleEndExam}
+            disabled={endingExam}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-900/40 hover:bg-rose-900/70 border border-rose-700/60 text-rose-200 rounded-lg text-xs font-bold transition disabled:opacity-50"
+            title="Conclude and finish examination"
+          >
+            <span>{endingExam ? "Ending..." : "Finish Exam"}</span>
+          </button>
         </div>
       </header>
 
@@ -466,7 +735,7 @@ const ExamPaperNotepad = () => {
                 </div>
               </div>
             </div>
-          ) : isAwaitingFaculty ? (
+          ) : isAwaitingFaculty && !isEditingResubmit ? (
             /* SCENARIO 2: WAITING FOR FACULTY EVALUATION / DECISION */
             <div className="flex-1 overflow-y-auto p-6 sm:p-10 flex flex-col items-center justify-center text-center space-y-6">
               <div className="relative">
@@ -545,11 +814,28 @@ const ExamPaperNotepad = () => {
                   <span className="font-semibold uppercase tracking-wider text-[11px]">
                     Submitted Conceptual Answer (Locked)
                   </span>
-                  <span>Attempt #{progress?.conceptualAttemptsCount || 1}</span>
+                  <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Latest Submission Saved
+                  </span>
                 </div>
                 <div className="max-h-60 overflow-y-auto p-4 rounded-xl bg-slate-900 border border-slate-800 font-mono text-xs text-slate-300 whitespace-pre-wrap leading-relaxed">
                   {progress?.lastConceptualAnswer || answerText}
                 </div>
+                {currentQStatus !== "evaluating" && currentQConceptualStatus !== "evaluating" && (
+                  <div className="pt-2 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAnswerText(progress?.lastConceptualAnswer || answerText);
+                        isEditingResubmitRef.current = true;
+                        setIsEditingResubmit(true);
+                      }}
+                      className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-600/20 transition"
+                    >
+                      Edit & Resubmit Answer
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -576,6 +862,15 @@ const ExamPaperNotepad = () => {
                     onClick={() => {
                       if (window.confirm("Clear paper answer draft?")) {
                         setAnswerText("");
+                        answerTextRef.current = "";
+                        const currentTargetQId = activeQuestionIdRef.current || data?.question?._id;
+                        if (currentTargetQId) {
+                          const qKey = currentTargetQId.toString();
+                          answersCacheRef.current.set(qKey, "");
+                          dirtyQuestionsRef.current.add(qKey);
+                        }
+                        if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+                        triggerAutosave("", currentTargetQId).catch(() => {});
                       }
                     }}
                     className="text-xs px-2 py-1 text-slate-400 hover:text-rose-400"
@@ -589,72 +884,113 @@ const ExamPaperNotepad = () => {
                   <span>{wordCount} Words</span>
                   <span>•</span>
                   <span>{charCount} Characters</span>
-                  <span>•</span>
-                  <span className="font-semibold text-slate-300">
-                    Attempt {currentAttempts} of {maxAttempts}
-                  </span>
                 </div>
               </div>
 
-              {/* Correction Required Banner (if faculty returned answer) */}
-              {isCorrectionRequired && (
-                <div className="bg-amber-950/60 border-b border-amber-800/80 px-4 py-3 text-xs text-amber-200 space-y-2">
-                  <div className="flex items-start gap-2">
-                    <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
-                    <div className="space-y-1">
-                      <div className="font-bold text-amber-300 text-sm">
-                        Your Conceptual Answer Requires Improvement
-                      </div>
-                      <p className="text-amber-200/90">
-                        {progress?.facultyFeedback ||
-                          "Your conceptual answer requires improvement. Please review the faculty feedback and correct your answer before resubmitting."}
-                      </p>
-                    </div>
-                  </div>
+              {/* Existing Notepad Comment Box: Populated with AI Evaluation Errors & Faculty Feedback */}
+              {isCorrectionRequired && (() => {
+                const aiEval = progress?.lastAIEvaluation || null;
+                const evalSummary = aiEval?.overallFeedback || aiEval?.feedbackSummary || "";
+                const correctList = aiEval?.correctConcepts || aiEval?.strengths || [];
+                const missingList = aiEval?.missingConcepts || [];
+                const incorrectList = aiEval?.incorrectConcepts || [];
+                const suggestionsList = aiEval?.improvementSuggestions || aiEval?.suggestions || [];
 
-                  {/* Previous AI Evaluation Report / Missing Concepts */}
-                  {progress?.lastAIEvaluation && (
-                    <div className="mt-2 p-3 rounded-xl bg-slate-900/90 border border-amber-900/50 space-y-2">
-                      <div className="flex items-center gap-2">
-                        <span className="px-2 py-0.5 rounded-md font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
-                          Error Percentage: {progress.lastAIEvaluation.errorPercentage}% (Threshold: &lt;50%)
-                        </span>
-                        {progress.lastAIEvaluation.understandingPercentage !== undefined && (
-                          <span className="px-2 py-0.5 rounded-md font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                            Understanding: {progress.lastAIEvaluation.understandingPercentage}%
+                return (
+                  <div className="bg-amber-950/60 border-b border-amber-800/80 px-4 py-3 text-xs text-amber-200 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+                      <div className="space-y-1">
+                        <div className="font-bold text-amber-300 text-sm">
+                          AI Evaluation Feedback — Corrections Required
+                        </div>
+                        <p className="text-amber-200/90">
+                          <strong>Corrections Required:</strong>{" "}
+                          {progress?.facultyFeedback ||
+                            evalSummary ||
+                            "Your conceptual answer requires improvement. Please review the feedback below and correct your answer before resubmitting."}
+                        </p>
+                      </div>
+                    </div>
+
+                    {aiEval && (
+                      <div className="mt-2 p-3 rounded-xl bg-slate-900/90 border border-amber-900/50 space-y-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="px-2 py-0.5 rounded-md font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                            Error Percentage: {aiEval.errorPercentage}% (Threshold: &lt;50%)
                           </span>
+                          {aiEval.understandingPercentage !== undefined && (
+                            <span className="px-2 py-0.5 rounded-md font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                              Understanding: {aiEval.understandingPercentage}%
+                            </span>
+                          )}
+                          <span className="px-2 py-0.5 rounded-md font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+                            Marks: {aiEval.totalMarks ?? Math.round(((aiEval.understandingPercentage ?? (100 - aiEval.errorPercentage)) / 100) * (aiEval.maximumMarks || question?.marks || 10) * 10) / 10} / {aiEval.maximumMarks || question?.marks || 10}
+                          </span>
+                        </div>
+
+                        {evalSummary && (
+                          <p className="text-xs text-slate-300 pt-1 italic">
+                            &ldquo;{evalSummary}&rdquo;
+                          </p>
+                        )}
+
+                        {incorrectList.length > 0 && (
+                          <div>
+                            <span className="text-[11px] font-bold text-rose-400 uppercase block">
+                              Incorrect Concepts:
+                            </span>
+                            <ul className="list-disc pl-4 space-y-0.5 text-rose-200">
+                              {incorrectList.map((ic, idx) => (
+                                <li key={idx}>{ic}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {missingList.length > 0 && (
+                          <div>
+                            <span className="text-[11px] font-bold text-rose-300 uppercase block">
+                              Missing Concepts:
+                            </span>
+                            <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
+                              {missingList.map((mc, idx) => (
+                                <li key={idx}>{mc}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {suggestionsList.length > 0 && (
+                          <div>
+                            <span className="text-[11px] font-bold text-indigo-300 uppercase block">
+                              Suggestions:
+                            </span>
+                            <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
+                              {suggestionsList.map((sug, idx) => (
+                                <li key={idx}>{sug}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {correctList.length > 0 && (
+                          <div>
+                            <span className="text-[11px] font-bold text-emerald-300 uppercase block">
+                              Correct Points / Strengths:
+                            </span>
+                            <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
+                              {correctList.map((cp, idx) => (
+                                <li key={idx}>{cp}</li>
+                              ))}
+                            </ul>
+                          </div>
                         )}
                       </div>
-
-                      {progress.lastAIEvaluation.missingConcepts?.length > 0 && (
-                        <div>
-                          <span className="text-[11px] font-bold text-rose-300 uppercase block">
-                            Missing Concepts:
-                          </span>
-                          <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
-                            {progress.lastAIEvaluation.missingConcepts.map((mc, idx) => (
-                              <li key={idx}>{mc}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-
-                      {progress.lastAIEvaluation.suggestions?.length > 0 && (
-                        <div>
-                          <span className="text-[11px] font-bold text-indigo-300 uppercase block">
-                            Suggestions for Improvement:
-                          </span>
-                          <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
-                            {progress.lastAIEvaluation.suggestions.map((sug, idx) => (
-                              <li key={idx}>{sug}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Error Banner */}
               {errorMsg && (
@@ -682,11 +1018,40 @@ const ExamPaperNotepad = () => {
                 </div>
               )}
 
-              {/* Notepad Textarea */}
+              {/* Notepad Textarea with Security Copy/Paste restrictions */}
               <div className="flex-1 relative p-4 flex flex-col">
                 <textarea
                   value={answerText}
                   onChange={handleTextChange}
+                  onContextMenu={(e) => {
+                    if (PHASE3_SECURITY_ENABLED) {
+                      e.preventDefault();
+                      setWarningMessage("Security Policy: Context menu is disabled during exams.");
+                      setShowWarningModal(true);
+                    }
+                  }}
+                  onCopy={(e) => {
+                    if (PHASE3_SECURITY_ENABLED) {
+                      e.preventDefault();
+                      setWarningMessage("Security Policy: Copying text is strictly disabled.");
+                      setShowWarningModal(true);
+                    }
+                  }}
+                  onPaste={(e) => {
+                    if (PHASE3_SECURITY_ENABLED) {
+                      e.preventDefault();
+                      setWarningMessage("Security Policy: Pasting answers is strictly disabled. Please type your answer.");
+                      setShowWarningModal(true);
+                      logExamSecurityEvent(examId, "notepad_paste_blocked");
+                    }
+                  }}
+                  onCut={(e) => {
+                    if (PHASE3_SECURITY_ENABLED) {
+                      e.preventDefault();
+                      setWarningMessage("Security Policy: Cutting text is disabled.");
+                      setShowWarningModal(true);
+                    }
+                  }}
                   placeholder="Write your comprehensive conceptual solution here...
 - Explain your algorithmic approach in clear logical steps.
 - Describe data structures and why they were chosen.
@@ -706,6 +1071,18 @@ const ExamPaperNotepad = () => {
                 </Link>
 
                 <div className="flex items-center gap-3">
+                  {isAwaitingFaculty && isEditingResubmit && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        isEditingResubmitRef.current = false;
+                        setIsEditingResubmit(false);
+                      }}
+                      className="px-3 py-2 text-xs font-semibold text-slate-300 hover:text-white border border-slate-700 rounded-xl hover:bg-slate-800 transition"
+                    >
+                      Cancel Edit
+                    </button>
+                  )}
                   <button
                     onClick={() => triggerAutosave(answerText)}
                     className="px-3 py-2 text-xs font-semibold text-slate-300 hover:text-white border border-slate-700 rounded-xl hover:bg-slate-800 transition"
@@ -715,7 +1092,7 @@ const ExamPaperNotepad = () => {
 
                   <button
                     onClick={handleSubmitConceptualAnswer}
-                    disabled={submitting || !answerText.trim() || currentAttempts >= maxAttempts}
+                    disabled={submitting || !answerText.trim()}
                     className="inline-flex items-center gap-2 px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-600/30 disabled:opacity-40 disabled:cursor-not-allowed transition transform active:scale-95"
                   >
                     {submitting ? (
@@ -727,7 +1104,11 @@ const ExamPaperNotepad = () => {
                       <>
                         <Send className="w-4 h-4 text-indigo-200" />
                         <span>
-                          {isCorrectionRequired ? "Resubmit Corrected Answer" : "Submit Conceptual Answer"}
+                          {isCorrectionRequired
+                            ? "Resubmit Corrected Answer"
+                            : isAwaitingFaculty
+                            ? "Resubmit Conceptual Answer"
+                            : "Submit Conceptual Answer"}
                         </span>
                       </>
                     )}
@@ -738,6 +1119,36 @@ const ExamPaperNotepad = () => {
           )}
         </div>
       </div>
+
+      {/* Security Warning Modal (Active only when Phase 3 Security is enabled) */}
+      {PHASE3_SECURITY_ENABLED && showWarningModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-rose-500/50 rounded-2xl p-6 max-w-md w-full shadow-2xl text-center space-y-4">
+            <div className="w-14 h-14 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 flex items-center justify-center mx-auto">
+              <ShieldAlert className="w-8 h-8" />
+            </div>
+            <div className="space-y-1">
+              <h3 className="text-lg font-bold text-white tracking-wide">
+                Security Warning Notice
+              </h3>
+              <p className="text-xs text-rose-300 font-medium">
+                {warningMessage}
+              </p>
+            </div>
+            <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] text-slate-400 text-left space-y-1">
+              <div>• Tab switching and external browsing are prohibited during exams.</div>
+              <div>• Pasting or copying conceptual solutions is strictly prevented.</div>
+              <div>• All activity is logged and monitored in the faculty registry.</div>
+            </div>
+            <button
+              onClick={() => setShowWarningModal(false)}
+              className="w-full py-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold transition shadow-lg shadow-rose-600/30"
+            >
+              I Understand &amp; Acknowledge
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

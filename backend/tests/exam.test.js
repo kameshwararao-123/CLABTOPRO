@@ -118,12 +118,14 @@ test("sanitizeExamCodeSubmissionForStudent: strictly removes hidden test case in
   assert.equal(sanitized.testCases[0].input, "5");
   assert.equal(sanitized.testCases[0].expectedOutput, "25");
 
-  // Hidden test case strictly hides secret inputs and expected outputs, includes passed: false
+  // Hidden test case strictly hides secret inputs and expected outputs, includes passed: false and student actualOutput on failure
   assert.equal(sanitized.testCases[1].isHidden, true);
   assert.equal(sanitized.testCases[1].passed, false);
   assert.equal(sanitized.testCases[1].input, undefined);
   assert.equal(sanitized.testCases[1].expectedOutput, undefined);
-  assert.equal(sanitized.testCases[1].actualOutput, undefined);
+  assert.equal(sanitized.testCases[1].actualOutput, "WRONG_OUTPUT");
+  assert.equal(sanitized.testCases[1].hiddenTestNumber, 1);
+  assert.equal(sanitized.testCases[1].statusLabel, "Wrong Answer");
 });
 
 test("ExamQuestion schema: validation succeeds with both array and default rubric", () => {

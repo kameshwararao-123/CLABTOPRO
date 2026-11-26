@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { getMyAssignedQuestion } from "../../services/examService";
 import Loader from "../../components/common/Loader";
+import { isExamProgressCompleted } from "../../utils/examStatus";
 
 const ExamAssignedQuestion = () => {
   const { examId } = useParams();
@@ -35,11 +36,21 @@ const ExamAssignedQuestion = () => {
       setErrorMsg("");
       const params = qId ? { questionId: qId } : currentQId ? { questionId: currentQId } : {};
       const res = await getMyAssignedQuestion(examId, params);
+
+      if (isExamProgressCompleted(res.progress, res)) {
+        navigate(`/exams/${examId}/completed`, { replace: true });
+        return;
+      }
+
       setData(res);
       if (res.question?._id && res.question._id !== currentQId) {
         setSearchParams({ questionId: res.question._id });
       }
     } catch (err) {
+      if (err.response?.data?.isCompleted) {
+        navigate(`/exams/${examId}/completed`, { replace: true });
+        return;
+      }
       setErrorMsg(
         err.response?.data?.message || "Failed to load assigned question."
       );

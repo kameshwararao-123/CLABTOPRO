@@ -76,6 +76,14 @@ const questionProgressSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    answerDraftVersion: {
+      type: Number,
+      default: 0,
+    },
+    lastAnswerSavedAt: {
+      type: Date,
+      default: null,
+    },
     lastAIEvaluation: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
@@ -91,6 +99,14 @@ const questionProgressSchema = new mongoose.Schema(
     currentCode: {
       type: String,
       default: "",
+    },
+    codeDraftVersion: {
+      type: Number,
+      default: 0,
+    },
+    lastCodeSavedAt: {
+      type: Date,
+      default: null,
     },
     isCompleted: {
       type: Boolean,
@@ -250,6 +266,14 @@ const studentExamProgressSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    answerDraftVersion: {
+      type: Number,
+      default: 0,
+    },
+    lastAnswerSavedAt: {
+      type: Date,
+      default: null,
+    },
     lastAIEvaluation: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
@@ -266,9 +290,26 @@ const studentExamProgressSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    codeDraftVersion: {
+      type: Number,
+      default: 0,
+    },
+    lastCodeSavedAt: {
+      type: Date,
+      default: null,
+    },
     completedAt: {
       type: Date,
       default: null,
+    },
+    completionReason: {
+      type: String,
+      enum: ["all_questions_submitted", "faculty_ended", "time_expired", "student_ended", null],
+      default: null,
+    },
+    expiryProcessing: {
+      type: Boolean,
+      default: false,
     },
     finalScore: {
       type: Number,

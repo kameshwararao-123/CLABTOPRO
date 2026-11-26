@@ -931,11 +931,13 @@ test("Strict Hidden Test Security: sanitizeExamCodeSubmissionForStudent strictly
   assert.equal(sanitized.testCases[1].actualOutput, undefined);
   assert.equal(sanitized.testCases[1].visibility, "hidden");
 
-  // Verify hidden test case 3 strictly strips input, expectedOutput, and actualOutput
+  // Verify hidden test case 3 strictly strips input and expectedOutput, while allowing student actualOutput on failure
   assert.equal(sanitized.testCases[2].isHidden, true);
   assert.equal(sanitized.testCases[2].input, undefined);
   assert.equal(sanitized.testCases[2].expectedOutput, undefined);
-  assert.equal(sanitized.testCases[2].actualOutput, undefined);
+  assert.equal(sanitized.testCases[2].actualOutput, "299");
+  assert.equal(sanitized.testCases[2].hiddenTestNumber, 2);
+  assert.equal(sanitized.testCases[2].statusLabel, "Wrong Answer");
   assert.equal(sanitized.testCases[2].visibility, "hidden");
 
   // Verify aggregates are safe and correct

@@ -21,6 +21,10 @@ import {
   acknowledgeInstructions,
   getMyAssignedQuestion,
   autosaveAnswerDraft,
+  autosaveCodeDraft,
+  logExamSecurityEvent,
+  endStudentExam,
+  expireStudentExam,
   evaluatePaperAnswer,
   runExamCode,
   submitExamCode,
@@ -37,6 +41,7 @@ import {
   submitVivaExam,
   getVivaStudentResults,
   enrollStudentWithCode,
+  getAIEvaluationQueueStatus,
 } from "../controllers/examController.js";
 import {
   uploadQuestionsMiddleware,
@@ -167,11 +172,17 @@ router.get("/:examId/instructions", authMiddleware, getStudentExamInstructions);
 router.post("/:examId/acknowledge-instructions", authMiddleware, acknowledgeInstructions);
 router.get("/:examId/my-question", authMiddleware, getMyAssignedQuestion);
 router.post("/:examId/answers/autosave", authMiddleware, autosaveAnswerDraft);
+router.post("/:examId/code/autosave", authMiddleware, autosaveCodeDraft);
+router.post("/:examId/security-event", authMiddleware, logExamSecurityEvent);
+router.post("/:examId/student/end", authMiddleware, endStudentExam);
+router.post("/:examId/student/expire", authMiddleware, expireStudentExam);
 router.post("/:examId/answers/submit", authMiddleware, submitStudentPaperAnswer);
 router.post("/:examId/answers/evaluate", authMiddleware, submitStudentPaperAnswer);
 router.post("/:examId/compiler/run", authMiddleware, executionRateLimiter, runExamCode);
 router.post("/:examId/compiler/submit", authMiddleware, executionRateLimiter, submitExamCode);
 router.get("/:examId/completion", authMiddleware, getStudentExamCompletion);
+router.get("/:examId/students/:studentId/completion", authMiddleware, adminMiddleware, getStudentExamCompletion);
+router.get("/:examId/ai-evaluations/status", authMiddleware, adminMiddleware, getAIEvaluationQueueStatus);
 
 // Viva MCQ Student Routes
 router.get("/:examId/viva/instructions", authMiddleware, getVivaExamDetailsAndInstructions);

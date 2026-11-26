@@ -1,4 +1,5 @@
 import api from "./api";
+import { PHASE3_SECURITY_ENABLED } from "../configs/securityConfig";
 
 // =========================================================================
 // FACULTY EXAM SERVICE
@@ -174,10 +175,11 @@ export const getMyAssignedQuestion = async (examId, params = {}) => {
   return response.data;
 };
 
-export const autosaveAnswerDraft = async (examId, answerText, questionId) => {
+export const autosaveAnswerDraft = async (examId, answerText, questionId, version) => {
   const response = await api.post(`/exams/${examId}/answers/autosave`, {
     answerText,
     questionId,
+    version,
   });
   return response.data;
 };
@@ -243,8 +245,51 @@ export const submitExamCode = async (examId, code, questionId) => {
   return response.data;
 };
 
+export const autosaveCodeDraft = async (examId, code, questionId, version) => {
+  const response = await api.post(`/exams/${examId}/code/autosave`, {
+    code,
+    questionId,
+    version,
+  });
+  return response.data;
+};
+
+export const logExamSecurityEvent = async (examId, eventType, details = {}) => {
+  // If Phase 3 security is temporarily disabled, avoid generating new security events
+  if (!PHASE3_SECURITY_ENABLED) {
+    return { success: true, disabled: true };
+  }
+
+  try {
+    const response = await api.post(`/exams/${examId}/security-event`, {
+      eventType,
+      details,
+      timestamp: new Date(),
+    });
+    return response.data;
+  } catch (err) {
+    // Suppress security log failure so student UI doesn't crash
+    console.warn("Security event log failed", err);
+  }
+};
+
+export const endStudentExam = async (examId) => {
+  const response = await api.post(`/exams/${examId}/student/end`);
+  return response.data;
+};
+
+export const expireStudentExam = async (examId) => {
+  const response = await api.post(`/exams/${examId}/student/expire`);
+  return response.data;
+};
+
 export const getStudentExamCompletion = async (examId) => {
   const response = await api.get(`/exams/${examId}/completion`);
+  return response.data;
+};
+
+export const getFacultyStudentCompletion = async (examId, studentId) => {
+  const response = await api.get(`/exams/${examId}/students/${studentId}/completion`);
   return response.data;
 };
 

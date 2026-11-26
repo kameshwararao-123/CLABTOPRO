@@ -115,32 +115,58 @@ const examCodeSubmissionSchema = new mongoose.Schema(
 );
 
 examCodeSubmissionSchema.index({ examId: 1, studentId: 1, createdAt: -1 });
+examCodeSubmissionSchema.index({ examId: 1, submittedAt: -1 });
+
+const getStatusLabel = (status, passed) => {
+  if (passed || status === "passed") return "Passed successfully";
+  switch (status) {
+    case "failed":
+      return "Wrong Answer";
+    case "runtime_error":
+      return "Runtime Error";
+    case "time_limit":
+      return "Time Limit Exceeded";
+    case "compile_error":
+      return "Compilation Error";
+    case "skipped":
+      return "Skipped";
+    default:
+      return "Failed";
+  }
+};
 
 export const sanitizeExamCodeSubmissionForStudent = (submission) => {
   if (!submission) return null;
   const subObj = submission.toObject ? submission.toObject() : { ...submission };
 
   if (Array.isArray(subObj.testCaseResults)) {
+    let hiddenCounter = 0;
     subObj.testCases = subObj.testCaseResults.map((tc) => {
       const isPassed = tc.status === "passed";
       const isHidden = Boolean(tc.isHidden);
+      const statusLabel = getStatusLabel(tc.status, isPassed);
       if (isHidden) {
+        hiddenCounter += 1;
         return {
           testCaseNumber: tc.testCaseNumber,
+          hiddenTestNumber: hiddenCounter,
           visibility: "hidden",
           status: tc.status,
+          statusLabel,
           passed: isPassed,
-          executionTime: tc.executionTime,
+          executionTime: tc.executionTime ?? null,
           isHidden: true,
-          error: isPassed ? "" : tc.error || "Hidden test case failed",
+          ...(isPassed ? {} : { actualOutput: tc.actualOutput ?? "" }),
+          error: isPassed ? "" : tc.error || statusLabel,
         };
       }
       return {
         testCaseNumber: tc.testCaseNumber,
         visibility: "visible",
         status: tc.status,
+        statusLabel,
         passed: isPassed,
-        executionTime: tc.executionTime,
+        executionTime: tc.executionTime ?? null,
         isHidden: false,
         input: tc.input,
         expectedOutput: tc.expectedOutput,

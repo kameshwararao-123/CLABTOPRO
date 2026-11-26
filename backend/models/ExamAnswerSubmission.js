@@ -29,9 +29,24 @@ const examAnswerSubmissionSchema = new mongoose.Schema(
       required: true,
     },
     aiEvaluation: {
+      status: { type: String, default: "success" },
       errorPercentage: { type: Number, default: 0 },
       understandingPercentage: { type: Number, default: 0 },
       rawScore: { type: Number, default: 0 },
+      totalMarks: { type: Number, default: 0 },
+      maximumMarks: { type: Number, default: 10 },
+      percentage: { type: Number, default: 0 },
+      overallFeedback: { type: String, default: "" },
+      criteriaEvaluation: [
+        {
+          criterion: String,
+          maximumMarks: Number,
+          awardedMarks: Number,
+          status: String, // "fully_satisfied" | "partially_satisfied" | "not_satisfied" | "incorrect"
+          evidence: String,
+          feedback: String,
+        },
+      ],
       identifiedIssues: [
         {
           criterion: String,
@@ -40,9 +55,14 @@ const examAnswerSubmissionSchema = new mongoose.Schema(
           hint: String,
         },
       ],
+      correctConcepts: [String],
       missingConcepts: [String],
       strengths: [String],
       incorrectConcepts: [String],
+      improvementSuggestions: [String],
+      suggestions: [String],
+      rubricWarnings: [String],
+      rubricSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
       evaluationConfidence: { type: Number, default: 1 },
       feedbackSummary: { type: String, default: "" },
     },
@@ -88,6 +108,7 @@ const examAnswerSubmissionSchema = new mongoose.Schema(
 );
 
 examAnswerSubmissionSchema.index({ examId: 1, studentId: 1, attemptNumber: 1 });
+examAnswerSubmissionSchema.index({ examId: 1, submittedAt: -1 });
 
 const ExamAnswerSubmission = mongoose.model(
   "ExamAnswerSubmission",
