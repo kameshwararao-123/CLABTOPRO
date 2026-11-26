@@ -6,6 +6,7 @@ import {
   normalizeAndValidateRubric,
   buildEvaluationPrompt,
   generateConceptualFallback,
+  validateAndScoreGeminiResponse,
 } from "../services/examAIService.js";
 
 test("1. Default AI Evaluation Rubric uses Algorithmic Approach (50%) and Code Logic & Correctness (50%)", () => {
@@ -131,4 +132,96 @@ Reversed number = 54321`;
   const allText = JSON.stringify(result);
   assert.equal(allText.includes("Missing explanation"), false);
   assert.equal(allText.includes("Add a clear explanation"), false);
+});
+
+test("7. Missing Expected Output, syntax errors, and logical bugs never receive 100/100 and receive appropriate partial marks", () => {
+  const q = {
+    title: "Factorial of N",
+    problemStatement: "Compute the factorial of a positive integer N.",
+    marks: 100,
+  };
+
+  // Missing Expected Output (even with bare heading) -> < 100
+  const noOutputAns = `1. Algorithm
+- Read n
+- Initialize fact = 1
+- Loop i from 1 to n: fact = fact * i
+- Print fact
+
+2. Code Logic
+#include <stdio.h>
+int main() {
+    int n = 5, fact = 1;
+    for (int i = 1; i <= n; i++) {
+        fact *= i;
+    }
+    printf("%d", fact);
+    return 0;
+}
+
+3. Expected Output`;
+  const noOutputEval = generateConceptualFallback({ question: q, studentAnswer: noOutputAns });
+  assert.ok(noOutputEval.totalMarks < 100, `Missing expected output should not get 100, got ${noOutputEval.totalMarks}`);
+  assert.ok(noOutputEval.missingConcepts.includes("Expected Output"));
+
+  // Syntax error (missing semicolon & unbalanced brace) -> partial marks (> 0, < 100), syntax issue reported
+  const syntaxErrAns = `1. Algorithm
+- Read n
+- Multiply 1 to n in fact
+- Print fact
+
+2. Code Logic
+#include <stdio.h>
+int main() {
+    int n = 5, fact = 1;
+    for (int i = 1; i <= n; i++) {
+        fact *= i
+    }
+    printf("%d", fact)
+    return 0;
+
+3. Expected Output
+120`;
+  const syntaxEval = generateConceptualFallback({ question: q, studentAnswer: syntaxErrAns });
+  assert.ok(syntaxEval.totalMarks > 0 && syntaxEval.totalMarks < 100, `Syntax errors should get partial marks, got ${syntaxEval.totalMarks}`);
+  assert.ok(syntaxEval.identifiedIssues.some((i) => i.description.includes("Syntax error:")));
+
+  // Logical error (assignment in condition) -> < 100 and logical error reported
+  const logicErrAns = `1. Algorithm
+- Read n
+- Check if n equals 0
+
+2. Code Logic
+#include <stdio.h>
+int main() {
+    int n = 5;
+    if (n = 0) {
+        printf("1");
+    }
+    return 0;
+}
+
+3. Expected Output
+1`;
+  const logicEval = generateConceptualFallback({ question: q, studentAnswer: logicErrAns });
+  assert.ok(logicEval.totalMarks < 100, `Logical bug should not get 100, got ${logicEval.totalMarks}`);
+  assert.ok(logicEval.incorrectConcepts.some((c) => c.includes("Logical error:")));
+
+  // Gemini guardrail: never allow 100/100 when errors or missing concepts are reported
+  const norm = normalizeAndValidateRubric(q);
+  const guarded = validateAndScoreGeminiResponse({
+    normalizedRubric: norm,
+    studentAnswer: noOutputAns,
+    parsed: {
+      criteriaEvaluation: [
+        { criterion: "Algorithmic Approach", maximumMarks: 50, awardedMarks: 50, status: "fully_satisfied", evidence: "Steps", feedback: "Good" },
+        { criterion: "Code Logic & Correctness", maximumMarks: 50, awardedMarks: 50, status: "fully_satisfied", evidence: "Code", feedback: "Good" },
+      ],
+      correctConcepts: ["Loop logic"],
+      missingConcepts: ["Expected Output"],
+      incorrectConcepts: [],
+      improvementSuggestions: ["Add expected output"],
+    },
+  });
+  assert.ok(guarded.totalMarks < 100, `Guardrail must prevent 100/100 when missingConcepts is non-empty, got ${guarded.totalMarks}`);
 });
