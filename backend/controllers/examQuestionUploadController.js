@@ -162,6 +162,8 @@ export const getExtractionJobStatus = async (req, res, next) => {
         currentBatch: job.currentBatch,
         totalBatches: job.totalBatches,
         error: job.error,
+        validationErrors: job.validationErrors || [],
+        paperMetadata: job.paperMetadata || null,
         isSavedToExam: job.isSavedToExam,
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,

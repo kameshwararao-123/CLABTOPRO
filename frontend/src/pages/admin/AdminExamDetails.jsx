@@ -39,6 +39,7 @@ import {
   allocateExamQuestions,
   startExam,
   completeExam,
+  extendExamDuration,
   getExamMonitoring,
   facultyEvaluateStudentPaper,
   facultyAuthorizeCompiler,
@@ -78,9 +79,11 @@ const AdminExamDetails = () => {
   const [successMsg, setSuccessMsg] = useState("");
   const [copiedCode, setCopiedCode] = useState(false);
   const [questionsPerStudentInput, setQuestionsPerStudentInput] = useState(1);
+  const [extendMinutesInput, setExtendMinutesInput] = useState(30);
+  const [extendingDuration, setExtendingDuration] = useState(false);
 
   // Faculty Evaluation & Code Authorization State
-  const [evaluatingStudentId, setEvaluatingStudentId] = useState(null);
+  const [evaluatingRowId, setEvaluatingRowId] = useState(null);
   const [conceptualReportModal, setConceptualReportModal] = useState(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [decisionLoading, setDecisionLoading] = useState(false);
@@ -115,11 +118,8 @@ const AdminExamDetails = () => {
     sampleTestCases: [{ input: "", expectedOutput: "", explanation: "" }],
     hiddenTestCases: [{ input: "", expectedOutput: "" }],
     rubric: {
-      syntaxStructure: 20,
-      logicCorrectness: 30,
-      algorithmicApproach: 25,
-      codeEfficiency: 15,
-      constraintsHandling: 10,
+      algorithmicApproach: 50,
+      codeLogicCorrectness: 50,
     },
   });
 
@@ -269,10 +269,30 @@ const AdminExamDetails = () => {
     }
   };
 
+  const handleExtendExamDuration = async () => {
+    const mins = Number(extendMinutesInput);
+    if (!Number.isFinite(mins) || mins <= 0) {
+      setErrorMsg("Please enter a valid number of minutes to extend.");
+      return;
+    }
+    try {
+      setExtendingDuration(true);
+      setErrorMsg("");
+      const res = await extendExamDuration(examId, mins);
+      setSuccessMsg(res.message || `Exam duration extended by ${mins} minutes.`);
+      await fetchExamDetails();
+    } catch (err) {
+      setErrorMsg(err.response?.data?.message || "Failed to extend exam duration.");
+    } finally {
+      setExtendingDuration(false);
+    }
+  };
+
   // Faculty Evaluation & Code Authorization Handlers
   const handleFacultyEvaluate = async (studentRow) => {
+    const rowKey = studentRow.rowId || `${studentRow.studentId}_${studentRow.targetQuestionId || ""}`;
     try {
-      setEvaluatingStudentId(studentRow.studentId);
+      setEvaluatingRowId(rowKey);
       setErrorMsg("");
       setSuccessMsg("");
       const res = await facultyEvaluateStudentPaper(
@@ -311,7 +331,7 @@ const AdminExamDetails = () => {
     } catch (err) {
       setErrorMsg(err.response?.data?.message || "Failed to perform AI evaluation.");
     } finally {
-      setEvaluatingStudentId(null);
+      setEvaluatingRowId(null);
     }
   };
 
@@ -456,11 +476,8 @@ const AdminExamDetails = () => {
     }
 
     const sumWeights =
-      Number(newQuestion.rubric.syntaxStructure) +
-      Number(newQuestion.rubric.logicCorrectness) +
       Number(newQuestion.rubric.algorithmicApproach) +
-      Number(newQuestion.rubric.codeEfficiency) +
-      Number(newQuestion.rubric.constraintsHandling);
+      Number(newQuestion.rubric.codeLogicCorrectness);
 
     if (sumWeights !== 100) {
       setErrorMsg(`Evaluation rubric weights must sum to 100% (currently ${sumWeights}%).`);
@@ -499,29 +516,14 @@ const AdminExamDetails = () => {
         testCases,
         evaluationRubric: [
           {
-            criterion: "Conceptual Logic",
-            weight: Number(newQuestion.rubric.logicCorrectness),
-            description: "Correct mathematical/programmatic reasoning and algorithm",
-          },
-          {
             criterion: "Algorithmic Approach",
             weight: Number(newQuestion.rubric.algorithmicApproach),
-            description: "Problem solving strategy, optimality, approach",
+            description: "Correct problem-solving approach, logical sequence of steps, algorithm selection, conditions/iterations, and edge case handling",
           },
           {
-            criterion: "Syntax & Structure",
-            weight: Number(newQuestion.rubric.syntaxStructure),
-            description: "C language syntax, declarations, code formatting",
-          },
-          {
-            criterion: "Time & Space Complexity",
-            weight: Number(newQuestion.rubric.codeEfficiency),
-            description: "Efficiency and asymptotic bounds",
-          },
-          {
-            criterion: "I/O & Boundary Conditions",
-            weight: Number(newQuestion.rubric.constraintsHandling),
-            description: "Handling boundary values, zero, negative input",
+            criterion: "Code Logic & Correctness",
+            weight: Number(newQuestion.rubric.codeLogicCorrectness),
+            description: "Correct implementation of algorithm, conditions, loops, calculations, data handling, program flow, edge cases, and expected output consistency",
           },
         ],
       };
@@ -825,8 +827,44 @@ const AdminExamDetails = () => {
           </div>
           <p className="text-xs sm:text-sm font-medium text-slate-500">Duration / Marks</p>
           <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-800">
-            {exam.durationMinutes}m <span className="text-sm font-normal text-slate-400">/ {exam.totalMarks} pts</span>
+            {exam.durationMinutes >= 60 && exam.durationMinutes % 60 === 0
+              ? `${exam.durationMinutes / 60}h (${exam.durationMinutes}m)`
+              : `${exam.durationMinutes}m`}{" "}
+            <span className="text-sm font-normal text-slate-400">/ {exam.totalMarks} pts</span>
           </p>
+          {exam.status === "in_progress" && exam.startedAt && (
+            <div className="mt-2 pt-2 border-t border-slate-100 space-y-2">
+              <div className="text-[11px] font-semibold text-amber-700">
+                Remaining:{" "}
+                {(() => {
+                  const endMs = exam.officialEndTime
+                    ? new Date(exam.officialEndTime).getTime()
+                    : new Date(exam.startedAt).getTime() + Number(exam.durationMinutes || 180) * 60 * 1000;
+                  const remMins = Math.max(0, Math.ceil((endMs - Date.now()) / 60000));
+                  return `${remMins}m`;
+                })()}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="number"
+                  min="1"
+                  max="360"
+                  value={extendMinutesInput}
+                  onChange={(e) => setExtendMinutesInput(e.target.value)}
+                  className="w-16 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-mono text-slate-800"
+                  title="Minutes to extend"
+                />
+                <button
+                  type="button"
+                  disabled={extendingDuration}
+                  onClick={handleExtendExamDuration}
+                  className="rounded-lg bg-amber-600 hover:bg-amber-700 px-2.5 py-1 text-[11px] font-bold text-white transition disabled:opacity-50"
+                >
+                  {extendingDuration ? "Extending..." : "+ Extend (min)"}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1463,8 +1501,11 @@ const AdminExamDetails = () => {
                         (monitoringPage - 1) * MONITORING_PAGE_SIZE,
                         monitoringPage * MONITORING_PAGE_SIZE
                       )
-                      .map((row) => (
-                        <tr key={row.rowId || `${row.studentId}_${row.targetQuestionId || ""}`} className="transition hover:bg-slate-50/60">
+                      .map((row) => {
+                        const rowKey = row.rowId || `${row.studentId}_${row.targetQuestionId || ""}`;
+                        const isRowEvaluating = row.evaluationAction === "evaluating" || evaluatingRowId === rowKey;
+                        return (
+                        <tr key={rowKey} className="transition hover:bg-slate-50/60">
                           {/* 1. Roll No */}
                           <td className="px-5 py-3.5 font-semibold text-slate-900 font-mono text-xs">
                             {row.rollNo || "—"}
@@ -1520,7 +1561,7 @@ const AdminExamDetails = () => {
                                 {row.lastConceptualError < 50 ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
                                 {row.lastConceptualError}% Error ({row.lastConceptualError < 50 ? "PASS" : "FAIL"})
                               </span>
-                            ) : row.evaluationAction === "evaluating" || evaluatingStudentId === row.studentId ? (
+                            ) : isRowEvaluating ? (
                               <span className="inline-flex items-center gap-1 text-xs text-indigo-600 font-semibold">
                                 <Sparkles size={13} className="animate-spin" /> Evaluating...
                               </span>
@@ -1535,7 +1576,7 @@ const AdminExamDetails = () => {
 
                           {/* 6. Evaluation Action (Faculty-Controlled) */}
                           <td className="px-5 py-3.5 text-center">
-                            {row.evaluationAction === "evaluating" || evaluatingStudentId === row.studentId ? (
+                            {isRowEvaluating ? (
                               <button
                                 type="button"
                                 disabled
@@ -1634,6 +1675,10 @@ const AdminExamDetails = () => {
                               const solved = row.solvedQuestionsCount ?? 0;
                               const total = row.totalAssignedQuestions || 1;
                               const isAllSolved = total > 0 && solved >= total;
+                              const isExamEnded =
+                                exam?.status === "completed" ||
+                                monitoringData?.status === "completed";
+                              const label = row.solvedQuestionsLabel || `${solved}/${total}`;
                               return (
                                 <span
                                   className={`inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-mono font-bold border ${
@@ -1644,7 +1689,7 @@ const AdminExamDetails = () => {
                                       : "bg-slate-100 text-slate-600 border-slate-200"
                                   }`}
                                 >
-                                  {row.solvedQuestionsLabel || `${solved}/${total}`}
+                                  {isExamEnded ? `${label} Questions Completed` : label}
                                 </span>
                               );
                             })()}
@@ -1684,7 +1729,8 @@ const AdminExamDetails = () => {
                             </button>
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                   </tbody>
                 </table>
               </div>
@@ -2260,40 +2306,12 @@ const AdminExamDetails = () => {
 
               {/* Rubric Criteria Weights */}
               <div className="p-4 bg-indigo-50/40 border border-indigo-200 rounded-2xl space-y-2">
-                <span className="text-xs font-bold text-indigo-900 uppercase tracking-wider">
+                <span className="text-xs font-bold text-indigo-900 uppercase tracking-wider block">
                   AI Evaluation Rubric Weights (Must Sum to 100%)
                 </span>
-                <div className="grid grid-cols-5 gap-2 text-xs">
+                <div className="grid grid-cols-2 gap-3 text-xs">
                   <div>
-                    <label className="text-slate-600 block mb-1">Syntax</label>
-                    <input
-                      type="number"
-                      value={newQuestion.rubric.syntaxStructure}
-                      onChange={(e) =>
-                        setNewQuestion({
-                          ...newQuestion,
-                          rubric: { ...newQuestion.rubric, syntaxStructure: e.target.value },
-                        })
-                      }
-                      className="w-full bg-white border border-indigo-200 rounded-xl p-1.5 text-center font-bold"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-slate-600 block mb-1">Logic</label>
-                    <input
-                      type="number"
-                      value={newQuestion.rubric.logicCorrectness}
-                      onChange={(e) =>
-                        setNewQuestion({
-                          ...newQuestion,
-                          rubric: { ...newQuestion.rubric, logicCorrectness: e.target.value },
-                        })
-                      }
-                      className="w-full bg-white border border-indigo-200 rounded-xl p-1.5 text-center font-bold"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-slate-600 block mb-1">Algorithm</label>
+                    <label className="text-slate-600 block mb-1">Algorithmic Approach (%)</label>
                     <input
                       type="number"
                       value={newQuestion.rubric.algorithmicApproach}
@@ -2307,34 +2325,23 @@ const AdminExamDetails = () => {
                     />
                   </div>
                   <div>
-                    <label className="text-slate-600 block mb-1">Efficiency</label>
+                    <label className="text-slate-600 block mb-1">Code Logic &amp; Correctness (%)</label>
                     <input
                       type="number"
-                      value={newQuestion.rubric.codeEfficiency}
+                      value={newQuestion.rubric.codeLogicCorrectness}
                       onChange={(e) =>
                         setNewQuestion({
                           ...newQuestion,
-                          rubric: { ...newQuestion.rubric, codeEfficiency: e.target.value },
-                        })
-                      }
-                      className="w-full bg-white border border-indigo-200 rounded-xl p-1.5 text-center font-bold"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-slate-600 block mb-1">Constraints</label>
-                    <input
-                      type="number"
-                      value={newQuestion.rubric.constraintsHandling}
-                      onChange={(e) =>
-                        setNewQuestion({
-                          ...newQuestion,
-                          rubric: { ...newQuestion.rubric, constraintsHandling: e.target.value },
+                          rubric: { ...newQuestion.rubric, codeLogicCorrectness: e.target.value },
                         })
                       }
                       className="w-full bg-white border border-indigo-200 rounded-xl p-1.5 text-center font-bold"
                     />
                   </div>
                 </div>
+                <p className="text-[11px] text-slate-500">
+                  Edge cases are evaluated within these two categories, and expected output is used for consistency verification.
+                </p>
               </div>
 
               <div className="flex justify-end gap-3 pt-3 border-t border-slate-100">

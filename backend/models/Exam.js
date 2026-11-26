@@ -68,8 +68,17 @@ const examSchema = new mongoose.Schema(
       type: Number,
       required: true,
       min: 15,
-      max: 360,
-      default: 90,
+      max: 720,
+      default: 180,
+    },
+    officialEndTime: {
+      type: Date,
+      default: null,
+    },
+    extendedMinutes: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
     totalMarks: {
       type: Number,

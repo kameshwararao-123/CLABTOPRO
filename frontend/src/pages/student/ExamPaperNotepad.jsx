@@ -30,22 +30,35 @@ import { isExamProgressCompleted } from "../../utils/examStatus";
 import useVisibilityPolling from "../../hooks/useVisibilityPolling";
 import { PHASE3_SECURITY_ENABLED } from "../../configs/securityConfig";
 
-const PAPER_TEMPLATE = `1. ALGORITHMIC APPROACH:
-- Step-by-step description of the algorithm:
-- Data structures chosen and why:
+const extractCleanProblemDescription = (rawText) => {
+  if (!rawText || typeof rawText !== "string") return "";
+  let cleaned = rawText
+    .replace(/^\s*(?:Difficulty\s*:\s*[^\n]*|Marks\s*:\s*[^\n]*)\s*$/gim, "")
+    .replace(/\r\n/g, "\n");
+  const sampleSectionMatch = cleaned.match(
+    /(?:^|\n)\s*(?:Sample\s+Test\s+Cases?|Sample\s+Test\s+Case\s*#?\d*|Sample\s*#\d+)\b/i
+  );
+  if (sampleSectionMatch && typeof sampleSectionMatch.index === "number") {
+    cleaned = cleaned.slice(0, sampleSectionMatch.index);
+  }
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
+  return cleaned || rawText.trim();
+};
 
-2. LOGIC & CONTROL FLOW:
-- Initializations:
-- Loop conditions and state transitions:
-- Termination conditions:
+const PAPER_TEMPLATE = `1. Algorithmic Approach (30%)
+- Explain your problem-solving approach:
+- Describe the logical sequence of steps in your algorithm:
+- Explain how your algorithm solves the given problem:
 
-3. EDGE CASES & CONSTRAINTS HANDLING:
-- Edge case 1 (e.g., minimum input, zero, negative):
-- Edge case 2 (e.g., maximum constraints, duplicates):
+2. Code Logic & Correctness (50%)
+- Write your source code:
+- Explain the important conditions, loops, calculations, and operations:
+- Explain how your code implements the algorithm and produces the required result:
 
-4. COMPLEXITY ANALYSIS:
-- Time Complexity: O(?)
-- Space Complexity: O(?)
+3. Expected Output
+- Provide the expected output for the given problem:
+- Explain how the output follows from your algorithm and code logic:
+- Ensure the expected output matches the problem requirements:
 `;
 
 const ExamPaperNotepad = () => {
@@ -64,6 +77,7 @@ const ExamPaperNotepad = () => {
   const [errorMsg, setErrorMsg] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
   const [showQuestionPanel, setShowQuestionPanel] = useState(true);
+  const [showAIFeedback, setShowAIFeedback] = useState(false);
   const [timeLeftStr, setTimeLeftStr] = useState("");
 
   // Tab switch & copy-paste security
@@ -235,11 +249,17 @@ const ExamPaperNotepad = () => {
 
   // Exam Countdown Timer
   useEffect(() => {
-    if (!data?.exam?.startedAt || !data?.exam?.durationMinutes) return;
+    if (!data?.exam?.startedAt || (!data?.exam?.durationMinutes && !data?.exam?.officialEndTime)) return;
 
     const startTime = new Date(data.exam.startedAt).getTime();
-    const durationMs = data.exam.durationMinutes * 60 * 1000;
-    const endTime = startTime + durationMs;
+    const durationMs = Number(data.exam.durationMinutes || 180) * 60 * 1000;
+    const endTime = data.exam.officialEndTime
+      ? new Date(data.exam.officialEndTime).getTime()
+      : startTime + durationMs;
+
+    if (endTime > Date.now()) {
+      timerExpiredRef.current = false;
+    }
 
     const updateTimer = async () => {
       const now = Date.now();
@@ -493,6 +513,10 @@ const ExamPaperNotepad = () => {
       currentQConceptualStatus === "correction_required" ||
       currentQStatus === "conceptual_evaluation_failed");
 
+  const hasAIFeedback = Boolean(
+    progress?.lastAIEvaluation || (isCorrectionRequired && progress?.facultyFeedback)
+  );
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       {/* Top Bar Header */}
@@ -636,21 +660,10 @@ const ExamPaperNotepad = () => {
             <span className="text-xs font-bold uppercase tracking-wider text-indigo-400">
               Problem Specification
             </span>
-            <span
-              className={`text-xs px-2 py-0.5 rounded font-semibold ${
-                question.difficulty === "Easy"
-                  ? "bg-emerald-500/10 text-emerald-400"
-                  : question.difficulty === "Hard"
-                  ? "bg-rose-500/10 text-rose-400"
-                  : "bg-amber-500/10 text-amber-400"
-              }`}
-            >
-              {question.difficulty} ({question.marks} Marks)
-            </span>
           </div>
 
           <div className="text-xs text-slate-300 leading-relaxed whitespace-pre-line bg-slate-950 p-4 rounded-xl border border-slate-800/80">
-            {question.problemStatement}
+            {extractCleanProblemDescription(question.problemStatement)}
           </div>
 
           {question.constraints && (
@@ -665,15 +678,11 @@ const ExamPaperNotepad = () => {
           {/* Sample Cases */}
           {question.sampleTestCases && question.sampleTestCases.length > 0 && (
             <div className="space-y-2">
-              <span className="text-[11px] font-bold text-slate-400 uppercase">
-                Sample Test Cases
-              </span>
               {question.sampleTestCases.map((tc, idx) => (
                 <div
                   key={idx}
                   className="bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs font-mono space-y-1.5"
                 >
-                  <div className="text-slate-500 font-bold">Sample #{idx + 1}</div>
                   <div>
                     <span className="text-slate-500 block mb-0.5">Input:</span>
                     <pre className="pattern-output whitespace-pre overflow-x-auto text-slate-300 bg-slate-900/80 p-2 rounded border border-slate-800">
@@ -694,8 +703,11 @@ const ExamPaperNotepad = () => {
           {/* Rubric Weights Info */}
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-slate-400 space-y-1">
             <div className="font-bold text-slate-300 uppercase">Faculty Rubric:</div>
-            <div>Logic &amp; Correctness (30%) • Algorithm Approach (25%)</div>
-            <div>Syntax &amp; Structure (20%) • Efficiency (15%) • Constraints (10%)</div>
+            <div>1. Algorithmic Approach – 50%</div>
+            <div>2. Code Logic &amp; Correctness – 50%</div>
+            <div className="text-slate-500">
+              Relevant edge cases are evaluated within these two categories. Expected Output is used for consistency verification and does not receive separate marks. Sections may be written in any order.
+            </div>
           </div>
         </div>
 
@@ -881,116 +893,25 @@ const ExamPaperNotepad = () => {
                 </div>
 
                 <div className="flex items-center gap-3 text-xs text-slate-400">
+                  {hasAIFeedback && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAIFeedback((prev) => !prev)}
+                      className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded font-semibold border transition ${
+                        showAIFeedback
+                          ? "bg-amber-500/20 text-amber-200 border-amber-500/50"
+                          : "bg-amber-950/60 hover:bg-amber-900/70 text-amber-300 border-amber-700/70"
+                      }`}
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                      <span>{showAIFeedback ? "Hide AI Feedback" : "View AI Feedback"}</span>
+                    </button>
+                  )}
                   <span>{wordCount} Words</span>
                   <span>•</span>
                   <span>{charCount} Characters</span>
                 </div>
               </div>
-
-              {/* Existing Notepad Comment Box: Populated with AI Evaluation Errors & Faculty Feedback */}
-              {isCorrectionRequired && (() => {
-                const aiEval = progress?.lastAIEvaluation || null;
-                const evalSummary = aiEval?.overallFeedback || aiEval?.feedbackSummary || "";
-                const correctList = aiEval?.correctConcepts || aiEval?.strengths || [];
-                const missingList = aiEval?.missingConcepts || [];
-                const incorrectList = aiEval?.incorrectConcepts || [];
-                const suggestionsList = aiEval?.improvementSuggestions || aiEval?.suggestions || [];
-
-                return (
-                  <div className="bg-amber-950/60 border-b border-amber-800/80 px-4 py-3 text-xs text-amber-200 space-y-2">
-                    <div className="flex items-start gap-2">
-                      <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
-                      <div className="space-y-1">
-                        <div className="font-bold text-amber-300 text-sm">
-                          AI Evaluation Feedback — Corrections Required
-                        </div>
-                        <p className="text-amber-200/90">
-                          <strong>Corrections Required:</strong>{" "}
-                          {progress?.facultyFeedback ||
-                            evalSummary ||
-                            "Your conceptual answer requires improvement. Please review the feedback below and correct your answer before resubmitting."}
-                        </p>
-                      </div>
-                    </div>
-
-                    {aiEval && (
-                      <div className="mt-2 p-3 rounded-xl bg-slate-900/90 border border-amber-900/50 space-y-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="px-2 py-0.5 rounded-md font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
-                            Error Percentage: {aiEval.errorPercentage}% (Threshold: &lt;50%)
-                          </span>
-                          {aiEval.understandingPercentage !== undefined && (
-                            <span className="px-2 py-0.5 rounded-md font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                              Understanding: {aiEval.understandingPercentage}%
-                            </span>
-                          )}
-                          <span className="px-2 py-0.5 rounded-md font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
-                            Marks: {aiEval.totalMarks ?? Math.round(((aiEval.understandingPercentage ?? (100 - aiEval.errorPercentage)) / 100) * (aiEval.maximumMarks || question?.marks || 10) * 10) / 10} / {aiEval.maximumMarks || question?.marks || 10}
-                          </span>
-                        </div>
-
-                        {evalSummary && (
-                          <p className="text-xs text-slate-300 pt-1 italic">
-                            &ldquo;{evalSummary}&rdquo;
-                          </p>
-                        )}
-
-                        {incorrectList.length > 0 && (
-                          <div>
-                            <span className="text-[11px] font-bold text-rose-400 uppercase block">
-                              Incorrect Concepts:
-                            </span>
-                            <ul className="list-disc pl-4 space-y-0.5 text-rose-200">
-                              {incorrectList.map((ic, idx) => (
-                                <li key={idx}>{ic}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-
-                        {missingList.length > 0 && (
-                          <div>
-                            <span className="text-[11px] font-bold text-rose-300 uppercase block">
-                              Missing Concepts:
-                            </span>
-                            <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
-                              {missingList.map((mc, idx) => (
-                                <li key={idx}>{mc}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-
-                        {suggestionsList.length > 0 && (
-                          <div>
-                            <span className="text-[11px] font-bold text-indigo-300 uppercase block">
-                              Suggestions:
-                            </span>
-                            <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
-                              {suggestionsList.map((sug, idx) => (
-                                <li key={idx}>{sug}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-
-                        {correctList.length > 0 && (
-                          <div>
-                            <span className="text-[11px] font-bold text-emerald-300 uppercase block">
-                              Correct Points / Strengths:
-                            </span>
-                            <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
-                              {correctList.map((cp, idx) => (
-                                <li key={idx}>{cp}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
 
               {/* Error Banner */}
               {errorMsg && (
@@ -1018,47 +939,159 @@ const ExamPaperNotepad = () => {
                 </div>
               )}
 
-              {/* Notepad Textarea with Security Copy/Paste restrictions */}
-              <div className="flex-1 relative p-4 flex flex-col">
-                <textarea
-                  value={answerText}
-                  onChange={handleTextChange}
-                  onContextMenu={(e) => {
-                    if (PHASE3_SECURITY_ENABLED) {
-                      e.preventDefault();
-                      setWarningMessage("Security Policy: Context menu is disabled during exams.");
-                      setShowWarningModal(true);
-                    }
-                  }}
-                  onCopy={(e) => {
-                    if (PHASE3_SECURITY_ENABLED) {
-                      e.preventDefault();
-                      setWarningMessage("Security Policy: Copying text is strictly disabled.");
-                      setShowWarningModal(true);
-                    }
-                  }}
-                  onPaste={(e) => {
-                    if (PHASE3_SECURITY_ENABLED) {
-                      e.preventDefault();
-                      setWarningMessage("Security Policy: Pasting answers is strictly disabled. Please type your answer.");
-                      setShowWarningModal(true);
-                      logExamSecurityEvent(examId, "notepad_paste_blocked");
-                    }
-                  }}
-                  onCut={(e) => {
-                    if (PHASE3_SECURITY_ENABLED) {
-                      e.preventDefault();
-                      setWarningMessage("Security Policy: Cutting text is disabled.");
-                      setShowWarningModal(true);
-                    }
-                  }}
-                  placeholder="Write your comprehensive conceptual solution here...
-- Explain your algorithmic approach in clear logical steps.
-- Describe data structures and why they were chosen.
-- Detail edge case handling and constraints.
-- Provide time and space complexity analysis."
-                  className="w-full flex-1 bg-slate-950 text-slate-100 placeholder-slate-600 font-mono text-sm leading-relaxed p-4 rounded-xl border border-slate-800 focus:outline-hidden focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 resize-none shadow-inner"
-                />
+              {/* Notepad Textarea & Collapsible AI Feedback Side Panel */}
+              <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+                <div className="flex-1 relative p-4 flex flex-col min-w-0">
+                  <textarea
+                    value={answerText}
+                    onChange={handleTextChange}
+                    onContextMenu={(e) => {
+                      if (PHASE3_SECURITY_ENABLED) {
+                        e.preventDefault();
+                        setWarningMessage("Security Policy: Context menu is disabled during exams.");
+                        setShowWarningModal(true);
+                      }
+                    }}
+                    onCopy={(e) => {
+                      if (PHASE3_SECURITY_ENABLED) {
+                        e.preventDefault();
+                        setWarningMessage("Security Policy: Copying text is strictly disabled.");
+                        setShowWarningModal(true);
+                      }
+                    }}
+                    onPaste={(e) => {
+                      if (PHASE3_SECURITY_ENABLED) {
+                        e.preventDefault();
+                        setWarningMessage("Security Policy: Pasting answers is strictly disabled. Please type your answer.");
+                        setShowWarningModal(true);
+                        logExamSecurityEvent(examId, "notepad_paste_blocked");
+                      }
+                    }}
+                    onCut={(e) => {
+                      if (PHASE3_SECURITY_ENABLED) {
+                        e.preventDefault();
+                        setWarningMessage("Security Policy: Cutting text is disabled.");
+                        setShowWarningModal(true);
+                      }
+                    }}
+                    placeholder={PAPER_TEMPLATE}
+                    className="w-full flex-1 bg-slate-950 text-slate-100 placeholder-slate-600 font-mono text-sm leading-relaxed p-4 rounded-xl border border-slate-800 focus:outline-hidden focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 resize-none shadow-inner"
+                  />
+                </div>
+
+                {hasAIFeedback && showAIFeedback && (() => {
+                  const aiEval = progress?.lastAIEvaluation || null;
+                  const evalSummary = aiEval?.overallFeedback || aiEval?.feedbackSummary || "";
+                  const correctList = aiEval?.correctConcepts || aiEval?.strengths || [];
+                  const missingList = aiEval?.missingConcepts || [];
+                  const incorrectList = aiEval?.incorrectConcepts || [];
+                  const suggestionsList = aiEval?.improvementSuggestions || aiEval?.suggestions || [];
+
+                  return (
+                    <div className="lg:w-96 w-full border-t lg:border-t-0 lg:border-l border-amber-800/60 bg-amber-950/40 overflow-y-auto p-4 text-xs text-amber-200 space-y-3">
+                      <div className="flex items-start justify-between gap-2 pb-2 border-b border-amber-800/50">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                          <span className="font-bold text-amber-300 text-sm">
+                            AI Evaluation Feedback
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShowAIFeedback(false)}
+                          className="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700 text-[11px] font-semibold transition"
+                        >
+                          Close
+                        </button>
+                      </div>
+
+                      {(isCorrectionRequired || progress?.facultyFeedback || evalSummary) && (
+                        <p className="text-amber-200/90 leading-relaxed">
+                          <strong>{isCorrectionRequired ? "Corrections Required:" : "Summary:"}</strong>{" "}
+                          {progress?.facultyFeedback ||
+                            evalSummary ||
+                            "Your conceptual answer requires improvement. Please review the feedback below and correct your answer before resubmitting."}
+                        </p>
+                      )}
+
+                      {aiEval && (
+                        <div className="p-3 rounded-xl bg-slate-900/90 border border-amber-900/50 space-y-2.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="px-2 py-0.5 rounded-md font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                              Error Percentage: {aiEval.errorPercentage}% (Threshold: &lt;50%)
+                            </span>
+                            {aiEval.understandingPercentage !== undefined && (
+                              <span className="px-2 py-0.5 rounded-md font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                Understanding: {aiEval.understandingPercentage}%
+                              </span>
+                            )}
+                            <span className="px-2 py-0.5 rounded-md font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+                              Marks: {aiEval.totalMarks ?? Math.round(((aiEval.understandingPercentage ?? (100 - aiEval.errorPercentage)) / 100) * (aiEval.maximumMarks || question?.marks || 10) * 10) / 10} / {aiEval.maximumMarks || question?.marks || 10}
+                            </span>
+                          </div>
+
+                          {evalSummary && (
+                            <p className="text-xs text-slate-300 pt-1 italic">
+                              &ldquo;{evalSummary}&rdquo;
+                            </p>
+                          )}
+
+                          {incorrectList.length > 0 && (
+                            <div>
+                              <span className="text-[11px] font-bold text-rose-400 uppercase block">
+                                Incorrect Concepts:
+                              </span>
+                              <ul className="list-disc pl-4 space-y-0.5 text-rose-200">
+                                {incorrectList.map((ic, idx) => (
+                                  <li key={idx}>{ic}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                          {missingList.length > 0 && (
+                            <div>
+                              <span className="text-[11px] font-bold text-rose-300 uppercase block">
+                                Missing Concepts:
+                              </span>
+                              <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
+                                {missingList.map((mc, idx) => (
+                                  <li key={idx}>{mc}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                          {suggestionsList.length > 0 && (
+                            <div>
+                              <span className="text-[11px] font-bold text-indigo-300 uppercase block">
+                                Suggestions:
+                              </span>
+                              <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
+                                {suggestionsList.map((sug, idx) => (
+                                  <li key={idx}>{sug}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                          {correctList.length > 0 && (
+                            <div>
+                              <span className="text-[11px] font-bold text-emerald-300 uppercase block">
+                                Correct Points / Strengths:
+                              </span>
+                              <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
+                                {correctList.map((cp, idx) => (
+                                  <li key={idx}>{cp}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Bottom Action Footer */}

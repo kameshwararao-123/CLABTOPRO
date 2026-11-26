@@ -199,9 +199,18 @@ const ExamQuestionUploadModal = ({
         {/* Modal Body */}
         <div className="p-6 space-y-4 overflow-y-auto flex-1">
           {errorMsg && (
-            <div className="flex items-center gap-2.5 rounded-xl border border-red-200 bg-red-50 p-3.5 text-xs text-red-700">
-              <AlertCircle size={16} className="flex-shrink-0" />
-              <span>{errorMsg}</span>
+            <div className="space-y-2 rounded-xl border border-red-200 bg-red-50 p-3.5 text-xs text-red-700">
+              <div className="flex items-center gap-2.5 font-semibold">
+                <AlertCircle size={16} className="flex-shrink-0" />
+                <span>{errorMsg}</span>
+              </div>
+              {Array.isArray(jobStatus?.validationErrors) && jobStatus.validationErrors.length > 0 && (
+                <ul className="list-disc pl-6 space-y-1 text-[11px] text-red-700 max-h-40 overflow-y-auto">
+                  {jobStatus.validationErrors.map((vErr, idx) => (
+                    <li key={idx}>{vErr}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
 

@@ -240,6 +240,14 @@ const questionExtractionJobSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    validationErrors: {
+      type: [String],
+      default: [],
+    },
+    paperMetadata: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
     isSavedToExam: {
       type: Boolean,
       default: false,

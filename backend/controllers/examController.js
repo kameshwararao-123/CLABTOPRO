@@ -24,6 +24,17 @@ import { PHASE3_SECURITY_ENABLED } from "../configs/securityConfig.js";
 const isCompletedProgressStatus = (status) =>
   status === "completed" || status === "successfully_completed";
 
+export const getExamEndTimeMs = (exam) => {
+  if (!exam) return null;
+  if (exam.officialEndTime) {
+    return new Date(exam.officialEndTime).getTime();
+  }
+  if (exam.startedAt && exam.durationMinutes) {
+    return new Date(exam.startedAt).getTime() + Number(exam.durationMinutes) * 60 * 1000;
+  }
+  return null;
+};
+
 // Helper: Fisher-Yates Shuffle
 export const fisherYatesShuffle = (array) => {
   const shuffled = [...array];
@@ -140,7 +151,7 @@ export const createExam = async (req, res, next) => {
       examDate: new Date(examDate),
       startTime: startTime || "",
       endTime: endTime || "",
-      durationMinutes: durationMinutes ? Number(durationMinutes) : 90,
+      durationMinutes: durationMinutes ? Number(durationMinutes) : 180,
       totalMarks: totalMarks ? Number(totalMarks) : 100,
       instructions: instructions || undefined,
       maxConceptualAttempts: maxConceptualAttempts ? Number(maxConceptualAttempts) : 3,
@@ -397,26 +408,22 @@ const normalizeEvaluationRubric = (rawRubric) => {
   // Case 2: If it's an object with keys
   if (typeof rawRubric === "object" && !Array.isArray(rawRubric)) {
     const list = [];
-    const logic = rawRubric.logicCorrectnessWeight ?? rawRubric.logicCorrectness ?? rawRubric.logic;
     const algo = rawRubric.algorithmicApproachWeight ?? rawRubric.algorithmicApproach ?? rawRubric.algorithm;
-    const syntax = rawRubric.syntaxStructureWeight ?? rawRubric.syntaxStructure ?? rawRubric.syntax;
-    const eff = rawRubric.codeEfficiencyWeight ?? rawRubric.codeEfficiency ?? rawRubric.efficiency;
-    const constr = rawRubric.constraintsHandlingWeight ?? rawRubric.constraintsHandling ?? rawRubric.constraints;
+    const logic = rawRubric.codeLogicCorrectnessWeight ?? rawRubric.codeLogicCorrectness ?? rawRubric.logicCorrectnessWeight ?? rawRubric.logicCorrectness ?? rawRubric.logic;
 
-    if (logic !== undefined) {
-      list.push({ criterion: "Logic & Correctness", weight: Number(logic) || 30, description: "Flow of steps, edge case handling, correctness" });
-    }
     if (algo !== undefined) {
-      list.push({ criterion: "Algorithmic Approach", weight: Number(algo) || 25, description: "Problem solving strategy, optimality, approach" });
+      list.push({
+        criterion: "Algorithmic Approach",
+        weight: Number(algo) || 50,
+        description: "Correct problem-solving approach, logical sequence of steps, algorithm selection, conditions/iterations, and edge case handling",
+      });
     }
-    if (syntax !== undefined) {
-      list.push({ criterion: "Syntax & Structure", weight: Number(syntax) || 20, description: "C language syntax, declarations, code formatting" });
-    }
-    if (eff !== undefined) {
-      list.push({ criterion: "Code Efficiency", weight: Number(eff) || 15, description: "Efficiency and asymptotic bounds" });
-    }
-    if (constr !== undefined) {
-      list.push({ criterion: "Constraints Handling", weight: Number(constr) || 10, description: "Handling boundary values, zero, negative input" });
+    if (logic !== undefined) {
+      list.push({
+        criterion: "Code Logic & Correctness",
+        weight: Number(logic) || 50,
+        description: "Correct implementation of algorithm, conditions, loops, calculations, data handling, program flow, edge cases, and expected output consistency",
+      });
     }
 
     if (list.length > 0) return list;
@@ -913,19 +920,13 @@ export const enrollStudentWithCode = async (req, res, next) => {
       });
     }
 
-    if (exam.enrollmentClosed || exam.status === "completed" || exam.status === "cancelled") {
+    if (exam.status === "completed" || exam.status === "cancelled") {
       return res.status(400).json({
         message: "Enrollment for this examination is closed.",
       });
     }
 
-    if (exam.status === "in_progress") {
-      return res.status(400).json({
-        message: "Enrollment is closed because the examination has already started.",
-      });
-    }
-
-    // Check if already enrolled
+    // Check if already enrolled (already-enrolled students are never blocked or invalidated)
     const alreadyParticipating = (exam.participatingStudents || []).some(
       (s) => s.toString() === studentId.toString()
     );
@@ -936,13 +937,39 @@ export const enrollStudentWithCode = async (req, res, next) => {
       });
     }
 
-    // Atomically register student in exam roster to prevent race conditions
+    const ENROLLMENT_WINDOW_MS = 30 * 60 * 1000;
+    const isExamInProgress = exam.status === "in_progress";
+
+    if (isExamInProgress) {
+      const startedAtMs = exam.startedAt ? new Date(exam.startedAt).getTime() : 0;
+      const enrollmentDeadlineMs = startedAtMs + ENROLLMENT_WINDOW_MS;
+      if (!startedAtMs || Date.now() >= enrollmentDeadlineMs) {
+        return res.status(403).json({
+          message: "Enrollment closed. The 30-minute enrollment window for this exam has expired.",
+        });
+      }
+    } else if (exam.enrollmentClosed) {
+      return res.status(400).json({
+        message: "Enrollment for this examination is closed.",
+      });
+    }
+
+    // Atomically register student in exam roster to prevent race conditions and enforce deadline server-side
+    const atomicFilter = isExamInProgress
+      ? {
+          _id: exam._id,
+          participatingStudents: { $ne: studentId },
+          status: "in_progress",
+          startedAt: { $gt: new Date(Date.now() - ENROLLMENT_WINDOW_MS) },
+        }
+      : {
+          _id: exam._id,
+          participatingStudents: { $ne: studentId },
+          status: { $in: ["draft", "allocated", "scheduled"] },
+        };
+
     const updatedExam = await Exam.findOneAndUpdate(
-      {
-        _id: exam._id,
-        participatingStudents: { $ne: studentId },
-        status: { $in: ["draft", "allocated", "scheduled"] },
-      },
+      atomicFilter,
       {
         $addToSet: { participatingStudents: studentId },
         $push: {
@@ -956,21 +983,69 @@ export const enrollStudentWithCode = async (req, res, next) => {
     );
 
     if (!updatedExam) {
+      if (isExamInProgress) {
+        return res.status(403).json({
+          message: "Enrollment closed. The 30-minute enrollment window for this exam has expired.",
+        });
+      }
       return res.status(400).json({
         message: "Enrollment failed. You may already be enrolled or enrollment has closed.",
       });
     }
 
-    // Initialize StudentExamProgress record in waiting state without questions
+    // If joining an already-active coding exam within the 30-minute window, allocate questions for this student
+    let allocatedCount = 0;
+    const initialQuestionProgress = {};
+    if (isExamInProgress && exam.examType !== "viva") {
+      const existingAlloc = await ExamAllocation.findOne({ examId: exam._id, studentId }).lean();
+      if (!existingAlloc) {
+        const questionPool = await ExamQuestion.find({
+          examId: exam._id,
+          questionType: { $ne: "mcq" },
+        }).lean();
+        if (questionPool.length > 0) {
+          const k = Math.min(Math.max(1, Number(exam.questionsPerStudent) || 1), questionPool.length);
+          const existingAllocs = await ExamAllocation.find({ examId: exam._id })
+            .select("assignedQuestionIds")
+            .lean();
+          const usedCombos = new Set(
+            existingAllocs
+              .map((a) => (a.assignedQuestionIds || []).map((id) => id.toString()).sort().join(","))
+              .filter(Boolean)
+          );
+          const selected = selectDistinctQuestionsForStudent(questionPool, k, usedCombos);
+          const selectedIds = selected.map((q) => q._id);
+          await ExamAllocation.create({
+            examId: exam._id,
+            studentId,
+            questionId: selectedIds[0],
+            assignedQuestionIds: selectedIds,
+          });
+          allocatedCount = selectedIds.length;
+          for (const qId of selectedIds) {
+            initialQuestionProgress[qId.toString()] = {
+              questionId: qId,
+              status: "not_started",
+              conceptualStatus: "pending",
+              conceptualAttemptsCount: 0,
+              compilerAllowed: false,
+            };
+          }
+        }
+      }
+    }
+
+    // Initialize StudentExamProgress record
     await StudentExamProgress.findOneAndUpdate(
       { examId: exam._id, studentId },
       {
         $setOnInsert: {
           examId: exam._id,
           studentId,
-          status: "not_started",
+          status: isExamInProgress ? "question_assigned" : "not_started",
           instructionsAcknowledged: false,
-          questionProgress: {},
+          allocatedCount,
+          questionProgress: initialQuestionProgress,
         },
       },
       { upsert: true }
@@ -984,13 +1059,16 @@ export const enrollStudentWithCode = async (req, res, next) => {
         action: "student_enrolled_via_code",
         details: {
           examCode: normalizedCode,
+          enrolledDuringActiveWindow: isExamInProgress,
         },
       });
     }
 
-    // Return enrolled status and waiting message. Zero questions leaked or allocated!
+    // Return enrolled status and waiting/active message
     res.status(200).json({
-      message: "You have successfully joined the exam. Please wait for your faculty to start the exam.",
+      message: isExamInProgress
+        ? "You have successfully joined the active exam. You can start immediately."
+        : "You have successfully joined the exam. Please wait for your faculty to start the exam.",
       enrollmentStatus: "Successfully Enrolled",
       exam: {
         _id: exam._id,
@@ -1174,6 +1252,9 @@ export const startExam = async (req, res, next) => {
     exam.status = "in_progress";
     exam.enrollmentClosed = true;
     exam.startedAt = new Date();
+    exam.officialEndTime = new Date(
+      exam.startedAt.getTime() + (Number(exam.durationMinutes) || 180) * 60 * 1000
+    );
     exam.startedBy = req.user.userId;
     await exam.save();
 
@@ -1197,6 +1278,72 @@ export const startExam = async (req, res, next) => {
       exam,
       allocationsCount: savedAllocations.length,
       questionsPerStudent: k,
+    });
+  } catch (error) {
+    if (typeof next === "function") {
+      next(error);
+    } else {
+      res.status(500).json({ message: error.message });
+    }
+  }
+};
+
+/**
+ * Faculty extends the duration of an ongoing exam.
+ * Adds extraMinutes to officialEndTime and durationMinutes without resetting startedAt
+ * and without extending the 30-minute enrollment window.
+ */
+export const extendExamDuration = async (req, res, next) => {
+  try {
+    const { examId } = req.params;
+    const rawExtra = req.body?.extraMinutes ?? req.body?.minutes ?? req.body?.extendMinutes;
+    const extraMinutes = Number(rawExtra);
+
+    if (!Number.isFinite(extraMinutes) || extraMinutes <= 0 || extraMinutes > 360) {
+      return res.status(400).json({
+        message: "Please provide a valid extension between 1 and 360 minutes.",
+      });
+    }
+
+    const exam = await Exam.findById(examId);
+    if (!exam) {
+      return res.status(404).json({ message: "Exam not found." });
+    }
+
+    if (exam.status !== "in_progress") {
+      return res.status(400).json({
+        message: "Only an ongoing (in_progress) examination can be extended.",
+      });
+    }
+
+    const currentEndMs = getExamEndTimeMs(exam) || Date.now();
+    const newEndTime = new Date(currentEndMs + extraMinutes * 60 * 1000);
+
+    exam.officialEndTime = newEndTime;
+    exam.durationMinutes = (Number(exam.durationMinutes) || 180) + extraMinutes;
+    exam.extendedMinutes = (Number(exam.extendedMinutes) || 0) + extraMinutes;
+    await exam.save();
+
+    if (mongoose.connection && mongoose.connection.readyState === 1) {
+      await ExamAuditLog.create({
+        examId: exam._id,
+        actorId: req.user?.userId,
+        actorRole: req.user?.role || "admin",
+        action: "EXAM_DURATION_EXTENDED",
+        details: {
+          extraMinutes,
+          newDurationMinutes: exam.durationMinutes,
+          officialEndTime: exam.officialEndTime,
+        },
+      });
+    }
+
+    res.status(200).json({
+      message: `Exam duration extended by ${extraMinutes} minutes.`,
+      exam,
+      durationMinutes: exam.durationMinutes,
+      extendedMinutes: exam.extendedMinutes,
+      officialEndTime: exam.officialEndTime,
     });
   } catch (error) {
     if (typeof next === "function") {
@@ -1364,24 +1511,31 @@ export const getExamMonitoring = async (req, res, next) => {
           : [];
       const assignedTitles = assigned.map((q) => q.title).join(", ");
 
-      // Calculate Solved Questions (only successfully submitted questions, never drafts/in-progress)
-      const studentTotalAssigned = assigned.length || exam.questionsPerStudent || 1;
+      // Calculate Solved Questions (only successfully submitted/completed questions, deduplicated by questionId)
+      const uniqueAssignedIds = [];
+      const seenAssignedIds = new Set();
+      for (const qItem of assigned) {
+        const itemKey = qItem?._id?.toString();
+        if (itemKey && !seenAssignedIds.has(itemKey)) {
+          seenAssignedIds.add(itemKey);
+          uniqueAssignedIds.push(itemKey);
+        }
+      }
+      const studentTotalAssigned = uniqueAssignedIds.length || exam.questionsPerStudent || 1;
       let studentSolvedQuestions = 0;
-      if (assigned.length > 0) {
-        for (const qItem of assigned) {
-          const itemKey = qItem._id.toString();
-          const itemProg = prog?.questionProgress
-            ? (prog.questionProgress.get ? prog.questionProgress.get(itemKey) : prog.questionProgress[itemKey])
-            : null;
-          const itemCode = latestQuestionCodeMap.get(`${sId}_${itemKey}`) || (assigned.length === 1 ? latestCodeMap.get(sId) : null);
-          const isItemSubmittedSuccess = Boolean(
-            itemProg?.isCompleted ||
-            itemProg?.status === "completed" ||
-            (itemCode && itemCode.allPassed && itemCode.testCasesPassed > 0 && itemCode.testCasesPassed === itemCode.totalTestCases)
-          );
-          if (isItemSubmittedSuccess) {
-            studentSolvedQuestions += 1;
-          }
+      for (const itemKey of uniqueAssignedIds) {
+        const itemProg = prog?.questionProgress
+          ? (prog.questionProgress.get ? prog.questionProgress.get(itemKey) : prog.questionProgress[itemKey])
+          : null;
+        const itemCode = latestQuestionCodeMap.get(`${sId}_${itemKey}`) || (uniqueAssignedIds.length === 1 ? latestCodeMap.get(sId) : null);
+        const isItemSubmittedSuccess = Boolean(
+          itemProg?.isCompleted ||
+          itemProg?.status === "completed" ||
+          itemProg?.status === "successfully_completed" ||
+          (itemCode && itemCode.allPassed && itemCode.testCasesPassed > 0 && itemCode.testCasesPassed === itemCode.totalTestCases)
+        );
+        if (isItemSubmittedSuccess) {
+          studentSolvedQuestions += 1;
         }
       }
       const solvedQuestionsLabel = `${studentSolvedQuestions}/${studentTotalAssigned}`;
@@ -1450,7 +1604,11 @@ export const getExamMonitoring = async (req, res, next) => {
 
         const isSuccessfullyCompleted =
           (prog?.status === "completed" || prog?.status === "successfully_completed") &&
-          (exam.examType === "viva" || (hasApprovedConceptual && hasSubmittedCode && allTestsPassed));
+          (exam.examType === "viva" ||
+            (studentSolvedQuestions >= studentTotalAssigned &&
+              hasApprovedConceptual &&
+              hasSubmittedCode &&
+              allTestsPassed));
 
         let notepadStatus = "Pending";
 
@@ -2269,6 +2427,8 @@ export const getMyAssignedQuestion = async (req, res, next) => {
         durationMinutes: exam.durationMinutes,
         maxConceptualAttempts: exam.maxConceptualAttempts,
         startedAt: exam.startedAt,
+        officialEndTime: exam.officialEndTime || null,
+        extendedMinutes: exam.extendedMinutes || 0,
         questionsPerStudent: exam.questionsPerStudent || assigned.length,
       },
       progress: {
@@ -3370,14 +3530,12 @@ export const submitStudentPaperAnswer = async (req, res, next) => {
       return res.status(403).json({ message: "Exam is not currently active." });
     }
 
-    if (exam.startedAt && exam.durationMinutes) {
-      const endTimeMs = new Date(exam.startedAt).getTime() + Number(exam.durationMinutes) * 60 * 1000;
-      if (Date.now() >= endTimeMs) {
-        return res.status(403).json({
-          message: "Examination time has expired. Notepad submissions are locked.",
-          isCompleted: true,
-        });
-      }
+    const endTimeMs = getExamEndTimeMs(exam);
+    if (endTimeMs && Date.now() >= endTimeMs) {
+      return res.status(403).json({
+        message: "Examination time has expired. Notepad submissions are locked.",
+        isCompleted: true,
+      });
     }
 
     const allocation = await ExamAllocation.findOne({ examId, studentId })
@@ -3579,25 +3737,40 @@ export const facultyEvaluateStudentPaper = async (req, res, next) => {
       });
     }
 
-    // Prevent duplicate simultaneous evaluations
-    if (latestSub.status === "evaluating" || progress.status === "evaluating") {
+    const qKey = targetQuestion._id.toString();
+    const existingQp = progress.questionProgress?.get
+      ? progress.questionProgress.get(qKey)
+      : progress.questionProgress?.[qKey];
+
+    // Prevent duplicate simultaneous evaluations for THIS specific question
+    if (
+      latestSub.status === "evaluating" ||
+      existingQp?.status === "evaluating" ||
+      (!existingQp && progress.status === "evaluating")
+    ) {
       return res.status(409).json({
-        message: "Evaluation is currently in progress for this student. Please wait.",
+        message: "Evaluation is currently in progress for this question. Please wait.",
       });
     }
 
-    // Mark evaluating
+    // Mark evaluating on this submission & question
     latestSub.status = "evaluating";
     await latestSub.save();
 
     progress.status = "evaluating";
     progress.conceptualStatus = "evaluating";
-    const qKey = targetQuestion._id.toString();
-    if (progress.questionProgress && progress.questionProgress.get(qKey)) {
-      const qp = progress.questionProgress.get(qKey);
-      qp.status = "evaluating";
-      qp.conceptualStatus = "evaluating";
+    if (!progress.questionProgress) {
+      progress.questionProgress = new Map();
+    }
+    const qp = existingQp
+      ? (existingQp.toObject ? existingQp.toObject() : { ...existingQp })
+      : { questionId: targetQuestion._id };
+    qp.status = "evaluating";
+    qp.conceptualStatus = "evaluating";
+    if (progress.questionProgress.set) {
       progress.questionProgress.set(qKey, qp);
+    } else {
+      progress.questionProgress[qKey] = qp;
     }
     await progress.save();
 

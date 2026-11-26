@@ -153,6 +153,11 @@ export const enrollStudentWithCode = async (examCode) => {
   return response.data;
 };
 
+export const extendExamDuration = async (examId, extraMinutes) => {
+  const response = await api.patch(`/exams/${examId}/extend-duration`, { extraMinutes });
+  return response.data;
+};
+
 export const getStudentExams = async (examType) => {
   const response = await api.get("/exams/student/list", {
     params: { examType },

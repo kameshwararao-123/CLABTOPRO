@@ -293,7 +293,7 @@ const ExamAssignedQuestion = () => {
               <ShieldCheck className="w-4 h-4 text-indigo-400" /> Conceptual Evaluation Criteria
             </h3>
             <p className="text-xs text-indigo-200/80">
-              Your paper answer will be evaluated against: Logic &amp; Correctness (30%), Algorithmic Approach (25%), Syntax &amp; Structure (20%), Code Efficiency (15%), and Constraints (10%).
+              Your paper answer will be evaluated against: Algorithmic Approach (50%) and Code Logic &amp; Correctness (50%). Edge cases are considered within these two categories, and expected output is used for consistency verification.
               You must achieve an error rate <strong className="text-white">below 50%</strong> to unlock the code compiler for this question.
             </p>
           </div>

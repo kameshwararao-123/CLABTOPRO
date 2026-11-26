@@ -191,10 +191,16 @@ const examQuestionSchema = new mongoose.Schema(
     evaluationRubric: {
       type: [rubricCriterionSchema],
       default: () => [
-        { criterion: "Algorithm Correctness & Logic", weight: 35, description: "Flow of steps, edge case handling, correctness" },
-        { criterion: "Time & Space Complexity", weight: 20, description: "Efficiency and asymptotic bounds" },
-        { criterion: "Data Structures & Types", weight: 25, description: "Appropriate choice of variables, arrays, or pointers" },
-        { criterion: "I/O & Boundary Conditions", weight: 20, description: "Correct input format handling, zero/negative bounds" },
+        {
+          criterion: "Algorithmic Approach",
+          weight: 50,
+          description: "Correct problem-solving approach, logical sequence of steps, algorithm selection, conditions/iterations, and edge case handling",
+        },
+        {
+          criterion: "Code Logic & Correctness",
+          weight: 50,
+          description: "Correct implementation of algorithm, conditions, loops, calculations, data handling, program flow, edge cases, and expected output consistency",
+        },
       ],
     },
     testCases: {

@@ -447,11 +447,17 @@ const ExamCodeEditorPage = () => {
 
   // Exam Countdown Timer
   useEffect(() => {
-    if (!data?.exam?.startedAt || !data?.exam?.durationMinutes) return;
+    if (!data?.exam?.startedAt || (!data?.exam?.durationMinutes && !data?.exam?.officialEndTime)) return;
 
     const startTime = new Date(data.exam.startedAt).getTime();
-    const durationMs = data.exam.durationMinutes * 60 * 1000;
-    const endTime = startTime + durationMs;
+    const durationMs = Number(data.exam.durationMinutes || 180) * 60 * 1000;
+    const endTime = data.exam.officialEndTime
+      ? new Date(data.exam.officialEndTime).getTime()
+      : startTime + durationMs;
+
+    if (endTime > Date.now()) {
+      timerExpiredRef.current = false;
+    }
 
     const updateTimer = async () => {
       const now = Date.now();

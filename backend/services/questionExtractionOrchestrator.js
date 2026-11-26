@@ -1,5 +1,11 @@
 import QuestionExtractionJob from "../models/QuestionExtractionJob.js";
-import { parseDocumentQuestions, extractTextFromPdf } from "./questionParserService.js";
+import {
+  parseDocumentQuestions,
+  extractTextFromPdf,
+  extractStandardPdfMetadata,
+  splitRawTextIntoQuestionBlocks,
+  validateStandardCodingPdf,
+} from "./questionParserService.js";
 import { extractQuestionBatchWithGemini } from "./questionExtractorAIService.js";
 import { splitRawTextIntoMCQBlocks } from "./mcqParserService.js";
 import { extractMCQBatchWithGemini } from "./mcqExtractorAIService.js";
@@ -32,6 +38,25 @@ export const runQuestionExtractionJob = async (jobId) => {
     if (isVivaMCQ) {
       const pdfTextResult = await extractTextFromPdf(job.temporaryFilePath);
       rawQuestionBlocks = splitRawTextIntoMCQBlocks(pdfTextResult);
+    } else if (job.fileType === "pdf") {
+      const pdfTextResult = await extractTextFromPdf(job.temporaryFilePath);
+      const metadata = extractStandardPdfMetadata(pdfTextResult);
+      job.paperMetadata = metadata;
+      rawQuestionBlocks = splitRawTextIntoQuestionBlocks(pdfTextResult, metadata);
+
+      const validation = validateStandardCodingPdf({
+        rawInput: pdfTextResult,
+        blocks: rawQuestionBlocks,
+        metadata,
+      });
+      if (!validation.valid) {
+        job.status = "failed";
+        job.validationErrors = validation.errors;
+        job.error = validation.errors.slice(0, 3).join(" | ");
+        job.progressMessage = `PDF validation failed: ${validation.errors[0]}`;
+        await job.save();
+        return;
+      }
     } else {
       rawQuestionBlocks = await parseDocumentQuestions(
         job.temporaryFilePath,

@@ -449,6 +449,9 @@ export const extractTextFromPdf = async (filePath) => {
   // Strategy 1: Standard PDFParse with page-level header/footer isolation
   // This preserves font glyph separation (e.g. "1 2 3" matrix rows) with high precision
   const fileBuffer = await fs.promises.readFile(filePath);
+  if (!fileBuffer || fileBuffer.length < 5 || fileBuffer.subarray(0, 5).toString("ascii") !== "%PDF-") {
+    throw new Error("PDF is unreadable or corrupted (missing valid %PDF header).");
+  }
   let digitalText = "";
   let pages = [];
 
@@ -617,6 +620,203 @@ export const extractTextFromPdf = async (filePath) => {
   }
 };
 
+export const SUPPORTED_PROGRAMMING_LANGUAGES = new Set([
+  "c",
+  "cpp",
+  "c++",
+  "python",
+  "java",
+  "javascript",
+  "js",
+]);
+
+/**
+ * Extracts standard CLABTOPRO paper-level metadata from the header section before Q1.
+ */
+export const extractStandardPdfMetadata = (rawInput = "") => {
+  const combinedDoc =
+    typeof rawInput === "object" && rawInput !== null
+      ? rawInput.fullText || (rawInput.pages || []).map((p) => p.text || "").join("\n")
+      : String(rawInput || "");
+
+  const normalized = combinedDoc.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const firstQMatch = normalized.match(
+    /(?:^|\n)[ \t]*(?:Question\s*1\b|Q\.?\s*1\b|1[\.\)]\s+[A-Za-z])/i
+  );
+  const headerText = firstQMatch ? normalized.slice(0, firstQMatch.index) : normalized.slice(0, 2000);
+
+  const pickField = (regex) => {
+    const m = headerText.match(regex);
+    return m ? m[1].trim() : "";
+  };
+
+  const paperTitle =
+    pickField(/(?:^|\n)\s*(?:Question\s+Paper\s+Title|Paper\s+Title|Title)\s*[:\-]\s*([^\n]+)/i) ||
+    (headerText
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length >= 4 && !/^(?:Difficulty|Programming|Total|Marks|Page\s+\d)/i.test(l)) ||
+      "");
+
+  const difficultyRaw = pickField(/(?:^|\n)\s*Difficulty(?:\s+Level)?\s*[:\-]\s*([^\n]+)/i);
+  const difficultyLevel = difficultyRaw
+    ? /easy/i.test(difficultyRaw)
+      ? "Easy"
+      : /hard/i.test(difficultyRaw)
+      ? "Hard"
+      : /medium/i.test(difficultyRaw)
+      ? "Medium"
+      : difficultyRaw
+    : "";
+
+  const programmingLanguage = pickField(
+    /(?:^|\n)\s*(?:Programming\s+Language|Language)\s*[:\-]\s*([^\n]+)/i
+  );
+  const totalQRaw = pickField(
+    /(?:^|\n)\s*Total\s+(?:Number\s+of\s+)?Questions\s*[:\-]\s*(\d+)/i
+  );
+  const marksPerQRaw = pickField(
+    /(?:^|\n)\s*Marks\s+Per\s+Question\s*[:\-]\s*(\d+)/i
+  );
+  const totalHiddenRaw = pickField(
+    /(?:^|\n)\s*Total\s+Hidden\s+Test\s+Cases\s*[:\-]\s*(\d+)/i
+  );
+
+  return {
+    paperTitle,
+    difficultyLevel,
+    programmingLanguage,
+    totalQuestionsDeclared: totalQRaw ? Number(totalQRaw) : null,
+    marksPerQuestion: marksPerQRaw ? Number(marksPerQRaw) : null,
+    totalHiddenTestCasesDeclared: totalHiddenRaw ? Number(totalHiddenRaw) : null,
+  };
+};
+
+/**
+ * Validates extracted standard CLABTOPRO coding PDF structure and returns detailed per-question errors.
+ */
+export const validateStandardCodingPdf = ({ rawInput = "", blocks = [], metadata = null } = {}) => {
+  const meta = metadata || extractStandardPdfMetadata(rawInput);
+  const errors = [];
+
+  if (meta.programmingLanguage) {
+    const langNorm = meta.programmingLanguage.toLowerCase().trim();
+    if (!SUPPORTED_PROGRAMMING_LANGUAGES.has(langNorm)) {
+      errors.push(
+        `Unsupported programming language "${meta.programmingLanguage}". Supported languages: C, C++, Python, Java, JavaScript.`
+      );
+    }
+  }
+
+  if (!Array.isArray(blocks) || blocks.length === 0) {
+    errors.push("No valid programming questions could be extracted from the PDF.");
+    return { valid: false, errors, metadata: meta };
+  }
+
+  if (meta.totalQuestionsDeclared !== null && blocks.length !== meta.totalQuestionsDeclared) {
+    errors.push(
+      `Question count mismatch: metadata declares ${meta.totalQuestionsDeclared} questions, but ${blocks.length} were extracted.`
+    );
+  }
+
+  const seenNumbers = new Set();
+  const numericIndices = [];
+  let totalHiddenCount = 0;
+
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    const qLabel = b.originalQuestionNumber || `Question #${i + 1}`;
+    const qTitle = (b.title || "").trim();
+
+    if (!b.originalQuestionNumber || !b.originalQuestionNumber.trim()) {
+      errors.push(`Question #${i + 1} ("${qTitle || "Untitled"}"): Question number is missing.`);
+    } else {
+      const normNum = b.originalQuestionNumber.trim().toUpperCase();
+      if (seenNumbers.has(normNum)) {
+        errors.push(`Duplicate question number detected: ${normNum}.`);
+      }
+      seenNumbers.add(normNum);
+
+      const numMatch = normNum.match(/^Q?(\d+)$/i);
+      if (numMatch) {
+        numericIndices.push({ index: i, num: Number(numMatch[1]), label: normNum });
+      }
+    }
+
+    if (!qTitle) {
+      errors.push(`${qLabel}: Question title is missing.`);
+    }
+
+    const descText = String(b.rawContent || b.problemStatement || "").trim();
+    if (descText.length < 10) {
+      errors.push(`${qLabel} ("${qTitle || "Untitled"}"): Problem description is missing or unreadable.`);
+    }
+
+    const sampleCases = Array.isArray(b.sampleTestCases) ? b.sampleTestCases : [];
+    const hiddenCases = Array.isArray(b.hiddenTestCases) ? b.hiddenTestCases : [];
+
+    if (sampleCases.length === 0) {
+      errors.push(`${qLabel} ("${qTitle || "Untitled"}"): Missing Sample Test Cases (at least 1 sample test case is required).`);
+    } else {
+      sampleCases.forEach((tc, tcIdx) => {
+        if (tc.expectedOutput === undefined || tc.expectedOutput === null || String(tc.expectedOutput).trim() === "") {
+          errors.push(`${qLabel} ("${qTitle || "Untitled"}"): Sample Test Case ${tcIdx + 1} is missing expected output.`);
+        }
+        if (tc.input === undefined || tc.input === null) {
+          errors.push(`${qLabel} ("${qTitle || "Untitled"}"): Sample Test Case ${tcIdx + 1} is missing input.`);
+        }
+      });
+    }
+
+    if (hiddenCases.length === 0) {
+      errors.push(`${qLabel} ("${qTitle || "Untitled"}"): Missing Hidden Test Cases (at least 1 hidden test case is required).`);
+    } else {
+      hiddenCases.forEach((tc, tcIdx) => {
+        if (tc.expectedOutput === undefined || tc.expectedOutput === null || String(tc.expectedOutput).trim() === "") {
+          errors.push(`${qLabel} ("${qTitle || "Untitled"}"): Hidden Test Case ${tcIdx + 1} is missing expected output.`);
+        }
+        if (tc.input === undefined || tc.input === null) {
+          errors.push(`${qLabel} ("${qTitle || "Untitled"}"): Hidden Test Case ${tcIdx + 1} is missing input.`);
+        }
+      });
+    }
+
+    totalHiddenCount += hiddenCases.length;
+  }
+
+  // Verify continuous numbering (1, 2, 3, ...) when numeric question numbers are used
+  if (numericIndices.length > 0 && numericIndices.length === blocks.length) {
+    for (let i = 0; i < numericIndices.length; i++) {
+      const expected = i + 1;
+      if (numericIndices[i].num !== expected) {
+        errors.push(
+          `Question numbering is not continuous: expected Q${expected}, found ${numericIndices[i].label}.`
+        );
+        break;
+      }
+    }
+  }
+
+  if (
+    meta.totalHiddenTestCasesDeclared !== null &&
+    totalHiddenCount < meta.totalHiddenTestCasesDeclared
+  ) {
+    errors.push(
+      `Hidden test case count mismatch: metadata declares ${meta.totalHiddenTestCasesDeclared} hidden test cases, but only ${totalHiddenCount} were extracted.`
+    );
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    metadata: meta,
+    summary: {
+      totalQuestions: blocks.length,
+      totalHiddenTestCases: totalHiddenCount,
+    },
+  };
+};
+
 /**
  * Strict regex to identify genuine question boundaries.
  * Matches:
@@ -631,7 +831,7 @@ export const QUESTION_HEADER_REGEX =
  * Segments raw document text or structured pages into distinct question blocks.
  * Filters out false boundaries (e.g. sample outputs like "2: 3" or page numbers).
  */
-export const splitRawTextIntoQuestionBlocks = (rawInput = "") => {
+export const splitRawTextIntoQuestionBlocks = (rawInput = "", metadata = null) => {
   if (!rawInput) return [];
 
   let pages = [];
@@ -746,6 +946,15 @@ export const splitRawTextIntoQuestionBlocks = (rawInput = "") => {
     const title = current.title || `Question ${current.qNum}`;
     const { sampleTestCases, hiddenTestCases } = parseBlockAllTestCases(cleanedText, title);
 
+    const diffMatch = cleanedText.match(/(?:^|\n)\s*Difficulty(?:\s+Level)?\s*[:\-]\s*(Easy|Medium|Hard)\b/i);
+    const marksMatch = cleanedText.match(/(?:^|\n)\s*Marks\s*[:\-]\s*(\d+)\b/i);
+    const blockDifficulty = diffMatch
+      ? diffMatch[1].charAt(0).toUpperCase() + diffMatch[1].slice(1).toLowerCase()
+      : metadata?.difficultyLevel || "Medium";
+    const blockMarks = marksMatch
+      ? Number(marksMatch[1])
+      : metadata?.marksPerQuestion || 100;
+
     const contentType = classifyQuestionContent({
       title,
       problemStatement: cleanedText,
@@ -762,6 +971,8 @@ export const splitRawTextIntoQuestionBlocks = (rawInput = "") => {
     blocks.push({
       originalQuestionNumber: current.qNum.startsWith("Q") ? current.qNum : `Q${current.qNum}`,
       title,
+      difficulty: blockDifficulty,
+      marks: blockMarks,
       rawContent: cleanedText,
       contentType,
       hasPatternOrMatrix: contentType === "pattern" || contentType === "matrix",

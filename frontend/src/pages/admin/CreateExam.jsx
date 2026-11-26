@@ -20,7 +20,7 @@ const CreateExam = () => {
     examDate: new Date().toISOString().split("T")[0],
     startTime: "10:00",
     endTime: "11:30",
-    durationMinutes: initialType === "viva" ? 45 : 90,
+    durationMinutes: initialType === "viva" ? 45 : 180,
     totalMarks: initialType === "viva" ? 30 : 100,
     marksPerQuestion: 1,
     negativeMarking: 0.25,
@@ -48,7 +48,14 @@ const CreateExam = () => {
     setForm((prev) => ({
       ...prev,
       examType: type,
-      durationMinutes: type === "viva" ? (prev.durationMinutes === 90 ? 45 : prev.durationMinutes) : prev.durationMinutes,
+      durationMinutes:
+        type === "viva"
+          ? prev.durationMinutes === 180
+            ? 45
+            : prev.durationMinutes
+          : prev.durationMinutes === 45
+          ? 180
+          : prev.durationMinutes,
       totalMarks: type === "viva" ? (prev.totalMarks === 100 ? 30 : prev.totalMarks) : prev.totalMarks,
       instructions:
         type === "viva"
@@ -324,7 +331,7 @@ const CreateExam = () => {
               <input
                 type="number"
                 min="10"
-                max="360"
+                max="720"
                 name="durationMinutes"
                 value={form.durationMinutes}
                 onChange={handleChange}

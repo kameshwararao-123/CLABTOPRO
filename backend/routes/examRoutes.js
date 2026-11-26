@@ -14,6 +14,7 @@ import {
   getExamAllocations,
   startExam,
   completeExam,
+  extendExamDuration,
   getExamMonitoring,
   inspectStudentVivaExam,
   getStudentExams,
@@ -134,6 +135,7 @@ router.get("/:examId/allocations", authMiddleware, adminMiddleware, getExamAlloc
 // Lifecycle & Monitoring
 router.post("/:examId/start", authMiddleware, adminMiddleware, startExam);
 router.post("/:examId/complete", authMiddleware, adminMiddleware, completeExam);
+router.patch("/:examId/extend-duration", authMiddleware, adminMiddleware, extendExamDuration);
 router.get("/:examId/monitoring", authMiddleware, adminMiddleware, getExamMonitoring);
 router.get("/:examId/students/:studentId/viva-inspect", authMiddleware, adminMiddleware, inspectStudentVivaExam);
 
