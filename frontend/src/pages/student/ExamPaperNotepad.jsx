@@ -45,20 +45,14 @@ const extractCleanProblemDescription = (rawText) => {
   return cleaned || rawText.trim();
 };
 
-const PAPER_TEMPLATE = `1. Algorithmic Approach (30%)
-- Explain your problem-solving approach:
-- Describe the logical sequence of steps in your algorithm:
-- Explain how your algorithm solves the given problem:
+const PAPER_TEMPLATE = `1. Algorithm
 
-2. Code Logic & Correctness (50%)
-- Write your source code:
-- Explain the important conditions, loops, calculations, and operations:
-- Explain how your code implements the algorithm and produces the required result:
+
+2. Code Logic
+
 
 3. Expected Output
-- Provide the expected output for the given problem:
-- Explain how the output follows from your algorithm and code logic:
-- Ensure the expected output matches the problem requirements:
+
 `;
 
 const ExamPaperNotepad = () => {
@@ -705,8 +699,8 @@ const ExamPaperNotepad = () => {
             <div className="font-bold text-slate-300 uppercase">Faculty Rubric:</div>
             <div>1. Algorithmic Approach – 50%</div>
             <div>2. Code Logic &amp; Correctness – 50%</div>
-            <div className="text-slate-500">
-              Relevant edge cases are evaluated within these two categories. Expected Output is used for consistency verification and does not receive separate marks. Sections may be written in any order.
+            <div className="text-slate-400 pt-0.5">
+              Students are not required to provide written explanations. Evaluation is based on the correctness of the algorithm steps, code logic, and expected output. Correctness of the algorithm and code is sufficient for full marks.
             </div>
           </div>
         </div>

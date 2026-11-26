@@ -20,7 +20,7 @@ const CreateExam = () => {
     examDate: new Date().toISOString().split("T")[0],
     startTime: "10:00",
     endTime: "11:30",
-    durationMinutes: initialType === "viva" ? 45 : 180,
+    durationMinutes: initialType === "viva" ? 30 : 180,
     totalMarks: initialType === "viva" ? 30 : 100,
     marksPerQuestion: 1,
     negativeMarking: 0.25,
@@ -51,9 +51,9 @@ const CreateExam = () => {
       durationMinutes:
         type === "viva"
           ? prev.durationMinutes === 180
-            ? 45
+            ? 30
             : prev.durationMinutes
-          : prev.durationMinutes === 45
+          : prev.durationMinutes === 30
           ? 180
           : prev.durationMinutes,
       totalMarks: type === "viva" ? (prev.totalMarks === 100 ? 30 : prev.totalMarks) : prev.totalMarks,

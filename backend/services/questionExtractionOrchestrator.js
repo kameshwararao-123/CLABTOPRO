@@ -7,7 +7,7 @@ import {
   validateStandardCodingPdf,
 } from "./questionParserService.js";
 import { extractQuestionBatchWithGemini } from "./questionExtractorAIService.js";
-import { splitRawTextIntoMCQBlocks } from "./mcqParserService.js";
+import { splitRawTextIntoMCQBlocks, validateVivaMcqPdf } from "./mcqParserService.js";
 import { extractMCQBatchWithGemini } from "./mcqExtractorAIService.js";
 
 const BATCH_SIZE = 15; // 10-20 questions per batch for safe token usage & fast parallelization
@@ -37,7 +37,22 @@ export const runQuestionExtractionJob = async (jobId) => {
     let rawQuestionBlocks = [];
     if (isVivaMCQ) {
       const pdfTextResult = await extractTextFromPdf(job.temporaryFilePath);
-      rawQuestionBlocks = splitRawTextIntoMCQBlocks(pdfTextResult);
+      rawQuestionBlocks = splitRawTextIntoMCQBlocks(pdfTextResult, {
+        strictNumberedOnly: true,
+      });
+
+      const vivaValidation = validateVivaMcqPdf({
+        rawInput: pdfTextResult,
+        blocks: rawQuestionBlocks,
+      });
+      if (!vivaValidation.valid) {
+        job.status = "failed";
+        job.validationErrors = vivaValidation.errors;
+        job.error = vivaValidation.errors.slice(0, 3).join(" | ");
+        job.progressMessage = `PDF validation failed: ${vivaValidation.errors[0]}`;
+        await job.save();
+        return;
+      }
     } else if (job.fileType === "pdf") {
       const pdfTextResult = await extractTextFromPdf(job.temporaryFilePath);
       const metadata = extractStandardPdfMetadata(pdfTextResult);

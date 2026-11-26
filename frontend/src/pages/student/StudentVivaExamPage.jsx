@@ -114,7 +114,7 @@ const StudentVivaExamPage = () => {
     }
 
     // Initialize timer
-    const durationMins = examObj?.durationMinutes || 45;
+    const durationMins = examObj?.durationMinutes || 30;
     const startTime = qData.vivaStartedAt ? new Date(qData.vivaStartedAt).getTime() : Date.now();
     const totalMs = durationMins * 60 * 1000;
     const elapsedMs = Date.now() - startTime;

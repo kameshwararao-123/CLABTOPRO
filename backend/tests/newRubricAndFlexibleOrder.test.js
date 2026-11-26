@@ -84,3 +84,51 @@ test("5. Legacy 5-category DB rubric is automatically normalized to the new 2-ca
   assert.equal(norm.criteria[1].criterion, "Code Logic & Correctness");
   assert.equal(norm.criteria[1].maximumMarks, 50);
 });
+
+test("6. Fallback evaluation awards marks for valid algorithm, C code, and expected output without written explanations", () => {
+  const q = {
+    title: "Reverse a Number",
+    problemStatement: "Write a program to reverse a given positive integer.",
+    marks: 10,
+  };
+  const studentAnswer = `1. Algorithm
+- Read positive integer n
+- Initialize rev = 0
+- While n != 0:
+  - rem = n % 10
+  - rev = rev * 10 + rem
+  - n = n / 10
+- Print rev
+
+2. Code Logic & Correctness
+#include <stdio.h>
+int main() {
+    int n, rev = 0, rem;
+    printf("Enter a positive integer: ");
+    scanf("%d", &n);
+    while (n != 0) {
+        rem = n % 10;
+        rev = rev * 10 + rem;
+        n /= 10;
+    }
+    printf("Reversed number = %d", rev);
+    return 0;
+}
+
+3. Expected Output
+Enter a positive integer: 12345
+Reversed number = 54321`;
+
+  const result = generateConceptualFallback({ question: q, studentAnswer });
+
+  assert.equal(result.maximumMarks, 10);
+  assert.ok(result.totalMarks > 0, `Expected totalMarks > 0, got ${result.totalMarks}`);
+  assert.ok(result.errorPercentage < 50, `Expected errorPercentage < 50, got ${result.errorPercentage}`);
+  assert.equal(result.criteriaEvaluation.length, 2);
+  assert.ok(result.criteriaEvaluation[0].awardedMarks > 0);
+  assert.ok(result.criteriaEvaluation[1].awardedMarks > 0);
+
+  const allText = JSON.stringify(result);
+  assert.equal(allText.includes("Missing explanation"), false);
+  assert.equal(allText.includes("Add a clear explanation"), false);
+});

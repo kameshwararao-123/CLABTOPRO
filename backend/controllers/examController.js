@@ -151,7 +151,7 @@ export const createExam = async (req, res, next) => {
       examDate: new Date(examDate),
       startTime: startTime || "",
       endTime: endTime || "",
-      durationMinutes: durationMinutes ? Number(durationMinutes) : 180,
+      durationMinutes: durationMinutes ? Number(durationMinutes) : examType === "viva" ? 30 : 180,
       totalMarks: totalMarks ? Number(totalMarks) : 100,
       instructions: instructions || undefined,
       maxConceptualAttempts: maxConceptualAttempts ? Number(maxConceptualAttempts) : 3,
@@ -1320,7 +1320,7 @@ export const extendExamDuration = async (req, res, next) => {
     const newEndTime = new Date(currentEndMs + extraMinutes * 60 * 1000);
 
     exam.officialEndTime = newEndTime;
-    exam.durationMinutes = (Number(exam.durationMinutes) || 180) + extraMinutes;
+    exam.durationMinutes = (Number(exam.durationMinutes) || (exam.examType === "viva" ? 30 : 180)) + extraMinutes;
     exam.extendedMinutes = (Number(exam.extendedMinutes) || 0) + extraMinutes;
     await exam.save();
 
@@ -1429,7 +1429,7 @@ export const getExamMonitoring = async (req, res, next) => {
       return res.status(404).json({ message: "Exam not found." });
     }
 
-    let [allocations, progresses, answerSubs, codeSubs] = await Promise.all([
+    let [allocations, progresses, answerSubs, codeSubs, vivaQuestionBank] = await Promise.all([
       ExamAllocation.find({ examId })
         .populate("studentId", "username rollNo email")
         .populate("questionId", "title difficulty questionNumber marks")
@@ -1449,7 +1449,20 @@ export const getExamMonitoring = async (req, res, next) => {
         ExamCodeSubmission.find({ examId }).sort({ submittedAt: -1 }),
         "studentId questionId status testCasesPassed totalTestCases allPassed executionTime submittedAt"
       ).lean(),
+      exam.examType === "viva"
+        ? applySelect(ExamQuestion.find({ examId }), "_id correctAnswer").lean()
+        : Promise.resolve([]),
     ]);
+
+    const vivaCorrectAnswerMap = new Map();
+    for (const vq of vivaQuestionBank || []) {
+      if (vq?._id) {
+        vivaCorrectAnswerMap.set(
+          vq._id.toString(),
+          String(vq.correctAnswer || "").trim().toUpperCase()
+        );
+      }
+    }
 
     // Fallback: If no allocations have been created yet, generate virtual entries for participating students
     if (allocations.length === 0 && exam.participatingStudents?.length > 0) {
@@ -1498,9 +1511,14 @@ export const getExamMonitoring = async (req, res, next) => {
     }
 
     const rows = [];
+    const seenVivaStudentIds = new Set();
     for (const alloc of allocations) {
       const student = alloc.studentId;
       const sId = student?._id?.toString() || "";
+      if (exam.examType === "viva") {
+        if (!sId || seenVivaStudentIds.has(sId)) continue;
+        seenVivaStudentIds.add(sId);
+      }
       const prog = progressMap.get(sId);
 
       const assigned =
@@ -1540,7 +1558,12 @@ export const getExamMonitoring = async (req, res, next) => {
       }
       const solvedQuestionsLabel = `${studentSolvedQuestions}/${studentTotalAssigned}`;
 
-      const questionsToIterate = assigned.length > 0 ? assigned : [null];
+      const questionsToIterate =
+        exam.examType === "viva"
+          ? [null]
+          : assigned.length > 0
+          ? assigned
+          : [null];
 
       for (let qIndex = 0; qIndex < questionsToIterate.length; qIndex++) {
         const currentTargetQ = questionsToIterate[qIndex];
@@ -1566,6 +1589,37 @@ export const getExamMonitoring = async (req, res, next) => {
         ).length;
 
         const vivaAttempted = prog?.vivaResult?.attempted ?? liveAttemptedCount;
+        const vivaTotalQuestions =
+          exam.examType === "viva"
+            ? (uniqueAssignedIds.length > 0
+                ? uniqueAssignedIds.length
+                : prog?.vivaResult?.totalQuestions ||
+                  vivaCorrectAnswerMap.size ||
+                  Number(exam.questionsPerStudent) ||
+                  0)
+            : 0;
+
+        let liveVivaCorrectCount = 0;
+        if (exam.examType === "viva" && prog?.vivaResult?.correct === undefined) {
+          const targetQIds =
+            uniqueAssignedIds.length > 0
+              ? uniqueAssignedIds
+              : [...vivaCorrectAnswerMap.keys()];
+          for (const vqId of targetQIds) {
+            const ansObj = vivaAnswersObj[vqId];
+            const selected = ansObj?.selectedOption
+              ? String(ansObj.selectedOption).trim().toUpperCase()
+              : "";
+            const expected = vivaCorrectAnswerMap.get(vqId) || "";
+            if (selected && expected && expected !== "ANSWER NOT PROVIDED" && selected === expected) {
+              liveVivaCorrectCount += 1;
+            }
+          }
+        }
+        const vivaCorrectCount =
+          exam.examType === "viva"
+            ? (prog?.vivaResult?.correct ?? liveVivaCorrectCount)
+            : 0;
 
         // Check time expiration
         const examEnded = exam.status === "completed";
@@ -1766,7 +1820,10 @@ export const getExamMonitoring = async (req, res, next) => {
           vivaScore: prog?.vivaResult?.score ?? null,
           vivaPercentage: prog?.vivaResult?.percentage ?? null,
           vivaAttempted,
-          vivaCorrect: prog?.vivaResult?.correct ?? 0,
+          vivaTotalQuestions,
+          vivaCorrectCount,
+          vivaScoreLabel: exam.examType === "viva" ? `${vivaCorrectCount}/${vivaTotalQuestions}` : null,
+          vivaCorrect: exam.examType === "viva" ? vivaCorrectCount : (prog?.vivaResult?.correct ?? 0),
           vivaIncorrect: prog?.vivaResult?.incorrect ?? 0,
           vivaUnanswered: prog?.vivaResult?.unanswered ?? 0,
         });

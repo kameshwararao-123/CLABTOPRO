@@ -232,8 +232,9 @@ export const parseRawMCQBlock = (rawText = "", orderIndex = 1) => {
 /**
  * Splits document text into individual MCQ question blocks.
  */
-export const splitRawTextIntoMCQBlocks = (rawInput = "") => {
+export const splitRawTextIntoMCQBlocks = (rawInput = "", options = {}) => {
   if (!rawInput) return [];
+  const { strictNumberedOnly = false } = options;
 
   let combinedDoc = "";
   if (typeof rawInput === "object" && rawInput !== null) {
@@ -256,6 +257,17 @@ export const splitRawTextIntoMCQBlocks = (rawInput = "") => {
   const rawMatches = [];
   let match;
   while ((match = regex.exec(normalized)) !== null) {
+    const lineStart = match[0].startsWith("\n") ? match.index + 1 : match.index;
+    const lineEndIdx = normalized.indexOf("\n", lineStart);
+    const fullLine = normalized
+      .slice(lineStart, lineEndIdx === -1 ? normalized.length : lineEndIdx)
+      .trim();
+
+    // Do not treat guideline/sample preamble lines as actual questions
+    if (/^(?:e\.g\.|example|sample|note|guideline)/i.test(fullLine)) {
+      continue;
+    }
+
     const qNum = match[1] || match[2] || match[3] || "";
     rawMatches.push({
       qNum: qNum.trim(),
@@ -264,6 +276,10 @@ export const splitRawTextIntoMCQBlocks = (rawInput = "") => {
   }
 
   if (rawMatches.length === 0) {
+    if (strictNumberedOnly) {
+      return [];
+    }
+
     // Fallback: split by double line breaks if numbered headers weren't found
     const paragraphs = normalized
       .split(/\n\s*\n\s*\n/)
@@ -291,6 +307,94 @@ export const splitRawTextIntoMCQBlocks = (rawInput = "") => {
   }
 
   return blocks;
+};
+
+/**
+ * Validates an extracted Viva MCQ PDF against the Sample_Viva_MCQ_Template.pdf rules:
+ *  - Readable text
+ *  - Properly numbered sequential questions starting from Q1 (Q1, Q2, ...)
+ *  - Readable question text and >= 2 non-empty options (2 for True/False, 4 for regular MCQs)
+ *  - Reliable Answer key matching one of the extracted options
+ *  - Optional explanations (never required, never counted as extra questions)
+ */
+export const validateVivaMcqPdf = ({ rawInput = "", blocks = [] } = {}) => {
+  const errors = [];
+
+  let rawText = "";
+  if (typeof rawInput === "object" && rawInput !== null) {
+    rawText =
+      Array.isArray(rawInput.pages)
+        ? rawInput.pages.map((p) => p.text || "").join("\n")
+        : rawInput.fullText || "";
+  } else {
+    rawText = String(rawInput || "");
+  }
+
+  if (rawText.trim().length < 20) {
+    errors.push(
+      "Uploaded PDF does not contain readable text. Upload a text-based PDF matching Sample_Viva_MCQ_Template.pdf."
+    );
+    return { valid: false, errors };
+  }
+
+  if (!Array.isArray(blocks) || blocks.length === 0) {
+    errors.push(
+      "No properly numbered Viva MCQ questions (e.g., Q1., Q2., Q3.) were found. Number questions sequentially starting from Q1."
+    );
+    return { valid: false, errors };
+  }
+
+  const seenNumbers = new Set();
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    const qLabel = b.questionNumber || `Question ${i + 1}`;
+    const numMatch = String(qLabel).match(/(\d+)/);
+    const parsedNum = numMatch ? parseInt(numMatch[1], 10) : NaN;
+    const expectedNum = i + 1;
+
+    if (Number.isNaN(parsedNum)) {
+      errors.push(`${qLabel}: Invalid question numbering. Use sequential numbering starting from Q1.`);
+    } else {
+      if (seenNumbers.has(parsedNum)) {
+        errors.push(`Duplicate question number Q${parsedNum} detected. Ensure every question has a unique sequential number.`);
+      }
+      seenNumbers.add(parsedNum);
+      if (parsedNum !== expectedNum) {
+        errors.push(
+          `Expected Q${expectedNum} in sequence, but found ${qLabel}. Number questions sequentially starting from Q1 without skipping.`
+        );
+      }
+    }
+
+    if (!b.questionText || b.questionText.trim().length < 5) {
+      errors.push(`${qLabel}: Question text is missing or unreadable.`);
+    }
+
+    const opts = Array.isArray(b.options) ? b.options : [];
+    if (opts.length < 2) {
+      errors.push(
+        `${qLabel}: Insufficient answer options (${opts.length} found). Provide 4 options (A-D) for MCQs or 2 options (A-B) for True/False.`
+      );
+    } else if (opts.some((o) => !o.text || !String(o.text).trim())) {
+      errors.push(`${qLabel}: One or more answer options have empty or unreadable text.`);
+    }
+
+    const ans = String(b.correctAnswer || "").trim();
+    if (!ans || ans === "Answer Not Provided") {
+      errors.push(
+        `${qLabel}: Correct answer key is missing. Include an explicit answer line (e.g., "Answer: A").`
+      );
+    } else if (opts.length >= 2 && !opts.some((o) => o.optionId === ans)) {
+      errors.push(
+        `${qLabel}: Answer key "${ans}" does not match the extracted options (${opts.map((o) => o.optionId).join(", ")}).`
+      );
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
 };
 
 export const parseRawMCQQuestion = parseRawMCQBlock;

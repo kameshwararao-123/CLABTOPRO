@@ -1466,6 +1466,76 @@ const AdminExamDetails = () => {
               <Loader />
               <p className="mt-2 text-xs text-slate-400">Loading live monitoring data...</p>
             </div>
+          ) : (exam?.examType === "viva" || monitoringData?.examType === "viva") ? (
+            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-100 bg-slate-50/70 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      <th className="px-5 py-3.5">Roll No</th>
+                      <th className="px-5 py-3.5">Student Name</th>
+                      <th className="px-5 py-3.5 text-center">Total Questions</th>
+                      <th className="px-5 py-3.5 text-center">Correct Answers</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-slate-700">
+                    {(monitoringData.students || [])
+                      .filter((s) => {
+                        if (!monitoringSearch.trim()) return true;
+                        const q = monitoringSearch.trim().toLowerCase();
+                        return (
+                          s.username?.toLowerCase().includes(q) ||
+                          s.rollNo?.toLowerCase().includes(q) ||
+                          s.email?.toLowerCase().includes(q)
+                        );
+                      })
+                      .slice(
+                        (monitoringPage - 1) * MONITORING_PAGE_SIZE,
+                        monitoringPage * MONITORING_PAGE_SIZE
+                      )
+                      .map((row) => {
+                        const totalQ = row.vivaTotalQuestions ?? row.totalAssignedQuestions ?? 0;
+                        const correctQ = row.vivaCorrectCount ?? row.vivaCorrect ?? 0;
+                        const scoreLabel = row.vivaScoreLabel || `${correctQ}/${totalQ}`;
+                        return (
+                          <tr key={row.studentId} className="transition hover:bg-slate-50/60">
+                            <td className="px-5 py-3.5 font-semibold text-slate-900 font-mono text-xs">
+                              {row.rollNo || "—"}
+                            </td>
+                            <td className="px-5 py-3.5">
+                              <div className="font-semibold text-slate-900 text-sm">{row.username}</div>
+                              <div className="text-xs text-slate-400">{row.email || "No email"}</div>
+                            </td>
+                            <td className="px-5 py-3.5 text-center font-mono font-semibold text-slate-700">
+                              {totalQ}
+                            </td>
+                            <td className="px-5 py-3.5 text-center">
+                              <span
+                                className={`inline-flex items-center justify-center px-3 py-1 rounded-full text-xs font-mono font-bold border ${
+                                  totalQ > 0 && correctQ === totalQ
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : correctQ > 0
+                                    ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                    : "bg-slate-100 text-slate-600 border-slate-200"
+                                }`}
+                              >
+                                {scoreLabel}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    {(monitoringData.students || []).length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="px-5 py-8 text-center text-xs text-slate-400">
+                          No students enrolled in this Viva examination yet.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           ) : (
             <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
               <div className="overflow-x-auto">
@@ -2371,6 +2441,7 @@ const AdminExamDetails = () => {
         onClose={() => setIsUploadModalOpen(false)}
         examId={examId}
         examTitle={exam.title}
+        examType={exam.examType}
         onExtractionComplete={handleExtractionComplete}
       />
 

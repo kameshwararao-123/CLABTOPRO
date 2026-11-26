@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseRawMCQQuestion,
   splitRawTextIntoMCQBlocks,
+  validateVivaMcqPdf,
   normalizeOptionLetter,
   normalizeOptionText,
 } from "../services/mcqParserService.js";
@@ -363,4 +364,78 @@ test("StudentExamProgress Schema: validates in_progress status and vivaResult fi
   assert.equal(mockProgress.vivaResult.score, 7);
   assert.equal(mockProgress.vivaResult.attempted, 8);
   assert.equal(mockProgress.vivaResult.passed, true);
+});
+
+test("Viva PDF Validation: accepts Sample_Viva_MCQ_Template format with optional explanations and True/False", () => {
+  const sampleDoc = `
+CLABTOPRO VIVA EXAMINATION
+Subject: C Programming & Systems | Exam Duration: 30 Mins | Maximum Marks: 10
+MCQ Document Formatting Guidelines: Each question begins with a sequential number (e.g., Q1., Q2.).
+
+Q1. Which of the following data types in standard C has its size guaranteed to be at least 1 byte?
+A. char
+B. short
+C. int
+D. long
+Answer: A
+Explanation: By C language specification, sizeof(char) is always 1 byte.
+
+Q2. What will be the output of the following C code snippet?
+#include <stdio.h>
+int main() {
+    int arr[] = {10, 20, 30, 40};
+    printf("%d", *(arr + 2));
+    return 0;
+}
+A. 10
+B. 20
+C. 30
+D. 40
+Answer: C
+
+Q3. In C string handling, all string literals are terminated with '\\0'.
+A. True
+B. False
+Answer: A
+  `.trim();
+
+  const blocks = splitRawTextIntoMCQBlocks(sampleDoc, { strictNumberedOnly: true });
+  assert.equal(blocks.length, 3, "Guideline preamble and explanations must not be counted as extra questions");
+
+  const validation = validateVivaMcqPdf({ rawInput: sampleDoc, blocks });
+  assert.equal(validation.valid, true, `Expected valid Viva PDF, got errors: ${validation.errors.join("; ")}`);
+  assert.equal(validation.errors.length, 0);
+});
+
+test("Viva PDF Validation: rejects missing answer key, mismatched answer letter, non-sequential numbering, and unnumbered text", () => {
+  const badDoc = `
+Q1. Valid first question?
+A. Yes
+B. No
+Answer: A
+
+Q3. Skipped Q2 and missing answer key?
+A. Option 1
+B. Option 2
+C. Option 3
+D. Option 4
+
+Q4. Answer key does not match options?
+A. True
+B. False
+Answer: D
+  `.trim();
+
+  const blocks = splitRawTextIntoMCQBlocks(badDoc, { strictNumberedOnly: true });
+  const validation = validateVivaMcqPdf({ rawInput: badDoc, blocks });
+  assert.equal(validation.valid, false);
+  assert.ok(validation.errors.some((e) => e.includes("Expected Q2")));
+  assert.ok(validation.errors.some((e) => e.includes("Q3: Correct answer key is missing")));
+  assert.ok(validation.errors.some((e) => e.includes("Q4: Answer key \"D\" does not match")));
+
+  const unnumberedDoc = "What is a pointer in C?\nIt stores a memory address.\n\nWhat is an array?\nContiguous memory.";
+  const unnumberedBlocks = splitRawTextIntoMCQBlocks(unnumberedDoc, { strictNumberedOnly: true });
+  const unnumberedVal = validateVivaMcqPdf({ rawInput: unnumberedDoc, blocks: unnumberedBlocks });
+  assert.equal(unnumberedVal.valid, false);
+  assert.ok(unnumberedVal.errors.some((e) => e.includes("No properly numbered Viva MCQ questions")));
 });

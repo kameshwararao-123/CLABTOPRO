@@ -205,9 +205,13 @@ Your task is to evaluate HOW THE STUDENT THINKS AND SOLVES THE PROGRAMMING PROBL
 3. The Faculty-Provided Evaluation Rubric (the PRIMARY authority for awarding marks)
 
 CRITICAL EVALUATION RULES:
-1. ALGORITHM & CODE LOGIC FIRST:
-   - Prioritize: (1) whether the algorithm correctly solves the problem, (2) whether the code implements the correct logic, (3) whether conditions, loops, and calculations are correct, (4) whether relevant edge cases (minimum/maximum input, zero/negative values, duplicates, boundary/special cases) are handled within the algorithm and code logic, and (5) whether expected output agrees with the problem requirements, student's algorithm, and code logic as supporting evidence.
-   - Do NOT invent a separate scoring category for edge cases or expected output formatting.
+1. DIRECT EVALUATION WITHOUT EXPLANATION REQUIREMENTS:
+   - Evaluate the student's solution directly using: (1) Algorithm steps, (2) Source Code logic, and (3) Expected Output.
+   - Students are NOT required to provide written explanations, descriptions, justifications, or prose paragraphs for their algorithm, code, conditions, loops, or expected output.
+   - NEVER treat missing written explanations as missing concepts or incomplete answers, and NEVER penalize short answers or lack of descriptive text.
+   - If the algorithm steps, code logic, and expected output are correct, award FULL MARKS even when no written explanation is provided.
+   - Score Algorithmic Approach (50 marks) on correctness of the algorithmic steps/approach/edge cases, and Code Logic & Correctness (50 marks) on correctness of the actual code logic and implementation (total 100 marks).
+   - Use Expected Output ONLY to verify consistency with the problem requirements, algorithm, and code logic; NEVER award separate marks for Expected Output or explaining it. If Expected Output is wrong, use it as supporting evidence without automatically deducting marks unless an actual algorithmic or logical mistake is identified.
 2. FLEXIBLE NOTEPAD ANSWER ORDER:
    - Students may write Algorithm, Source Code, and Expected Output in ANY ORDER (e.g., Algorithm -> Code -> Expected Output, Code -> Algorithm -> Expected Output, Expected Output -> Algorithm -> Code, or any other arrangement).
    - Identify each section by its content, NOT its position.
@@ -552,7 +556,7 @@ export const generateConceptualFallback = ({
       awardedMarks: 0,
       status: "not_satisfied",
       evidence: "Not addressed in answer",
-      feedback: `No substantive explanation provided for ${c.criterion}.`,
+      feedback: `No solution content provided for ${c.criterion}.`,
     }));
     return {
       status: "fallback",
@@ -570,16 +574,16 @@ export const generateConceptualFallback = ({
       missingConcepts: normalizedRubric.criteria.map((c) => c.criterion),
       incorrectConcepts: [],
       improvementSuggestions: [
-        "Provide a complete conceptual explanation addressing each criterion in the question.",
+        "Provide your algorithm steps, source code, and expected output.",
       ],
       suggestions: [
-        "Provide a complete conceptual explanation addressing each criterion in the question.",
+        "Provide your algorithm steps, source code, and expected output.",
       ],
       identifiedIssues: normalizedRubric.criteria.map((c) => ({
         criterion: c.criterion,
         severity: "major",
-        description: `Missing explanation for ${c.criterion}.`,
-        hint: `Explain ${c.criterion} clearly in your answer.`,
+        description: `Missing required solution content for ${c.criterion}.`,
+        hint: `Include valid ${c.criterion} in your answer.`,
       })),
       rubricWarnings: normalizedRubric.rubricWarnings,
       rubricSnapshot: {
@@ -591,11 +595,44 @@ export const generateConceptualFallback = ({
     };
   }
 
-  // Evaluate each criterion using substantive sentence-level coverage (not single keyword presence)
-  const sentences = trimmed
+  // Evaluate each criterion directly from algorithm steps, source code logic, and expected output
+  // (written explanations are NOT required).
+  const cleanTextForEval = trimmed
+    .replace(/ignore\s+(?:all\s+)?previous\s+instructions.*$/gim, "")
+    .replace(/give\s+full\s+marks.*$/gim, "")
+    .trim();
+
+  const lines = cleanTextForEval
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const sentences = cleanTextForEval
     .split(/[.!?\n]+/)
     .map((s) => s.trim())
-    .filter((s) => s.length >= 12);
+    .filter((s) => s.length >= 8);
+
+  // Detect Algorithm steps, Source Code, and Expected Output regardless of order or headings
+  const algorithmStepLines = lines.filter(
+    (l) =>
+      (/^(?:[-*•]|\d+[\.\)])\s+/.test(l) ||
+        /\b(initialize|init|extract|append|remove|repeat|until|loop|iterate|check|compute|calculate|store|swap|sort|traverse|print|display|read|input|return|set|step)\b/i.test(
+          l
+        )) &&
+      !/^#include\b|^int\s+main\b|^[{};]$/.test(l)
+  );
+  const codeLines = lines.filter((l) =>
+    /(#include\b|\bint\s+main\b|\b(?:int|float|double|char|void|long)\s+\w+|\b(?:for|while|if|else\s+if|switch)\s*\(|\b(?:scanf|printf|return)\b|[;{}]|[%/*+-]=|[a-zA-Z_]\w*\s*=\s*[^=])/.test(
+      l
+    )
+  );
+  const hasControlFlowOrOps =
+    /\b(for|while|if|switch)\s*\(/.test(cleanTextForEval) ||
+    /[%/*+-]/.test(cleanTextForEval) ||
+    /\breturn\b/.test(cleanTextForEval);
+  const hasExpectedOutput =
+    /(?:expected\s+output|output)\s*[:\-]?/i.test(cleanTextForEval) ||
+    lines.some((l) => /^(?:enter\s+|output\s*[:=]|result\s*[:=]|\d+(?:\s+\d+)*$)/i.test(l));
 
   const criteriaEvaluation = [];
   const correctConcepts = [];
@@ -611,59 +648,121 @@ export const generateConceptualFallback = ({
   }
 
   for (const crit of normalizedRubric.criteria) {
-    const tokens = `${crit.criterion} ${crit.description}`
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((t) => t.length >= 4);
-
-    // Find a substantive sentence (not just a bare keyword list) that relates to this criterion
-    const matchingSentence = sentences.find((s) => {
-      const sLower = s.toLowerCase();
-      const words = sLower.split(/\s+/);
-      // Require actual explanatory phrasing (>= 6 words with grammatical connectives/verbs) and not an injection line
-      const hasExplanatoryStructure = /\b(is|are|was|were|be|the|a|an|to|of|in|by|for|with|from|where|when|which|that|uses|follows|stores|adds|removes|works|means)\b/.test(sLower);
-      if (words.length < 6 || !hasExplanatoryStructure) return false;
-      if (/ignore previous|give full marks|override score/i.test(sLower)) return false;
-      return tokens.some((tok) => sLower.includes(tok));
-    });
+    const critLower = crit.criterion.toLowerCase();
+    const isAlgoCriterion = /algorithm|approach/.test(critLower);
+    const isCodeLogicCriterion = /code\s*logic|logic\s*&\s*correctness|correctness|implementation/.test(
+      critLower
+    );
 
     let awardedMarks = 0;
     let status = "not_satisfied";
     let evidence = "Not addressed in answer";
-    let feedback = `Missing substantive explanation for ${crit.criterion}.`;
+    let feedback = `Missing ${crit.criterion} in submitted answer.`;
 
-    if (matchingSentence) {
-      const matchCount = tokens.filter((tok) =>
-        matchingSentence.toLowerCase().includes(tok)
-      ).length;
-      if (matchCount >= 2 || matchingSentence.split(/\s+/).length >= 10) {
+    if (isAlgoCriterion) {
+      if (algorithmStepLines.length >= 2 || (algorithmStepLines.length >= 1 && codeLines.length >= 2)) {
         awardedMarks = crit.maximumMarks;
         status = "fully_satisfied";
-        evidence = matchingSentence.slice(0, 160);
-        feedback = `Addressed ${crit.criterion} with relevant explanation.`;
-        correctConcepts.push(`${crit.criterion}: ${matchingSentence.slice(0, 100)}`);
-      } else {
-        awardedMarks = round1(crit.maximumMarks * 0.5);
+        evidence = algorithmStepLines.slice(0, 3).join(" | ").slice(0, 160);
+        feedback = `Algorithmic steps and problem-solving approach are present and clear.${
+          hasExpectedOutput ? " Consistent with expected output." : ""
+        }`;
+        correctConcepts.push(`${crit.criterion}: ${algorithmStepLines[0].slice(0, 100)}`);
+      } else if (algorithmStepLines.length === 1 || (codeLines.length >= 3 && hasControlFlowOrOps)) {
+        awardedMarks = round1(crit.maximumMarks * 0.7);
         status = "partially_satisfied";
-        evidence = matchingSentence.slice(0, 160);
-        feedback = `Partially addressed ${crit.criterion}; expand on ${crit.description || "key details"}.`;
-        improvementSuggestions.push(`Elaborate further on ${crit.criterion}.`);
+        evidence = (algorithmStepLines[0] || codeLines[0] || "").slice(0, 160);
+        feedback = `Algorithmic approach is demonstrated${
+          algorithmStepLines.length === 0 ? " via code flow" : ""
+        }; ensure all key steps and edge cases are covered.`;
+        correctConcepts.push(`${crit.criterion}: ${evidence.slice(0, 100)}`);
+      } else {
+        missingConcepts.push(crit.criterion);
+        improvementSuggestions.push(`Include clear algorithm steps for ${crit.criterion}.`);
         identifiedIssues.push({
           criterion: crit.criterion,
           severity: "moderate",
-          description: feedback,
-          hint: `Provide more detail on ${crit.criterion}.`,
+          description: `Algorithm steps not found for ${crit.criterion}.`,
+          hint: `Provide step-by-step algorithm logic for the problem.`,
+        });
+      }
+    } else if (isCodeLogicCriterion) {
+      if (codeLines.length >= 3 && hasControlFlowOrOps) {
+        awardedMarks = crit.maximumMarks;
+        status = "fully_satisfied";
+        evidence = codeLines.slice(0, 3).join(" | ").slice(0, 160);
+        feedback = `Source code logic, control flow, and operations are implemented.${
+          hasExpectedOutput ? " Expected output is provided for verification." : ""
+        }`;
+        correctConcepts.push(`${crit.criterion}: ${codeLines[0].slice(0, 100)}`);
+      } else if (codeLines.length >= 1 || hasControlFlowOrOps) {
+        awardedMarks = round1(crit.maximumMarks * 0.6);
+        status = "partially_satisfied";
+        evidence = (codeLines[0] || sentences[0] || "").slice(0, 160);
+        feedback = `Partial code logic detected; verify loop/condition completeness and edge-case handling.`;
+        correctConcepts.push(`${crit.criterion}: ${evidence.slice(0, 100)}`);
+      } else {
+        missingConcepts.push(crit.criterion);
+        improvementSuggestions.push(`Include working source code and logic for ${crit.criterion}.`);
+        identifiedIssues.push({
+          criterion: crit.criterion,
+          severity: "moderate",
+          description: `Source code implementation not found for ${crit.criterion}.`,
+          hint: `Provide source code implementing conditions, loops, and calculations.`,
         });
       }
     } else {
-      missingConcepts.push(crit.criterion);
-      improvementSuggestions.push(`Add a clear explanation of ${crit.criterion}.`);
-      identifiedIssues.push({
-        criterion: crit.criterion,
-        severity: "moderate",
-        description: `Missing explanation for ${crit.criterion}.`,
-        hint: `Explain ${crit.criterion} in your conceptual writeup.`,
+      const tokens = `${crit.criterion} ${crit.description}`
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((t) => t.length >= 4);
+
+      const matchingSentence = sentences.find((s) => {
+        const sLower = s.toLowerCase();
+        const words = sLower.split(/\s+/);
+        if (words.length < 6) return false;
+        if (/ignore previous|give full marks|override score/i.test(sLower)) return false;
+        const hasExplanatoryStructure =
+          /\b(is|are|was|were|be|being|been|has|have|had|can|could|will|would|should|may|might|must|do|does|did|means|refers|defined|stores|follows|adds|removes|inserts|deletes|returns|uses|used|allows|checks|prevents|such)\b/i.test(
+            sLower
+          );
+        if (!hasExplanatoryStructure) return false;
+        return tokens.some((tok) => sLower.includes(tok));
       });
+
+      if (matchingSentence) {
+        const matchCount = tokens.filter((tok) =>
+          matchingSentence.toLowerCase().includes(tok)
+        ).length;
+        if (matchCount >= 2 || matchingSentence.split(/\s+/).length >= 8) {
+          awardedMarks = crit.maximumMarks;
+          status = "fully_satisfied";
+          evidence = matchingSentence.slice(0, 160);
+          feedback = `Addressed ${crit.criterion} accurately.`;
+          correctConcepts.push(`${crit.criterion}: ${matchingSentence.slice(0, 100)}`);
+        } else {
+          awardedMarks = round1(crit.maximumMarks * 0.5);
+          status = "partially_satisfied";
+          evidence = matchingSentence.slice(0, 160);
+          feedback = `Partially addressed ${crit.criterion}.`;
+          improvementSuggestions.push(`Expand on ${crit.criterion} details.`);
+          identifiedIssues.push({
+            criterion: crit.criterion,
+            severity: "moderate",
+            description: feedback,
+            hint: `Address ${crit.criterion} more completely.`,
+          });
+        }
+      } else {
+        missingConcepts.push(crit.criterion);
+        improvementSuggestions.push(`Address ${crit.criterion} in your solution.`);
+        identifiedIssues.push({
+          criterion: crit.criterion,
+          severity: "moderate",
+          description: `Missing required solution content for ${crit.criterion}.`,
+          hint: `Include ${crit.criterion} in your answer.`,
+        });
+      }
     }
 
     criteriaEvaluation.push({
@@ -684,8 +783,10 @@ export const generateConceptualFallback = ({
 
   const overallFeedback =
     errorPercentage < 50
-      ? `Conceptual understanding demonstrated (${totalMarks}/${maximumMarks} marks across rubric criteria).`
-      : `Key rubric criteria are missing or incomplete (${totalMarks}/${maximumMarks} marks). Please revise your answer.`;
+      ? `Algorithmic approach and code logic evaluated (${totalMarks}/${maximumMarks} marks)${
+          hasExpectedOutput ? "; expected output verified" : ""
+        }.`
+      : `Key algorithm or code logic components are missing or incomplete (${totalMarks}/${maximumMarks} marks).`;
 
   return {
     status: "fallback",

@@ -305,15 +305,15 @@ const ExamQuestionUploadModal = ({
                     <div>
                       <div className="flex items-center gap-2">
                         <h4 className="text-xs sm:text-sm font-bold text-slate-800">
-                          {isViva ? "Viva MCQ PDF Upload Guidelines" : "PDF Upload Guidelines"}
+                          {isViva ? "VIVA EXAM MCQ PDF – FORMAT GUIDELINES" : "PDF Upload Guidelines"}
                         </h4>
                         <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-bold text-indigo-700">
-                          {isViva ? "MCQ Format Guide" : "Format Guide"}
+                          {isViva ? "Viva MCQ Format Guide" : "Format Guide"}
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-500">
                         {isViva
-                          ? "Follow the recommended Viva MCQ format for rapid automated extraction."
+                          ? "Follow the recommended Viva Exam MCQ PDF format (Sample_Viva_MCQ_Template.pdf) for accurate question extraction."
                           : "Follow the recommended question document structure for accurate automated extraction."}
                       </p>
                     </div>
@@ -351,27 +351,21 @@ const ExamQuestionUploadModal = ({
                           <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
                             1
                           </span>
-                          <span>
-                            Upload <strong>text-based PDFs</strong> generated using MS Word, Google Docs or LaTeX.
-                          </span>
+                          <span>Upload a text-based PDF containing Multiple Choice Questions (MCQs) for the Viva Exam.</span>
                         </li>
 
                         <li className="flex items-start gap-2">
                           <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
                             2
                           </span>
-                          <span>
-                            Use <strong>sequential question numbering</strong> such as Q1, Q2, Q3 (or 1., 2., 3.).
-                          </span>
+                          <span>Each question must begin with a sequential question number, such as Q1, Q2, Q3, and so on.</span>
                         </li>
 
                         <li className="flex items-start gap-2">
                           <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
                             3
                           </span>
-                          <span>
-                            Clearly separate <strong>question text and code snippets</strong> from the option choices.
-                          </span>
+                          <span>Write the complete question text immediately after its question number.</span>
                         </li>
 
                         <li className="flex items-start gap-2">
@@ -379,7 +373,8 @@ const ExamQuestionUploadModal = ({
                             4
                           </span>
                           <span>
-                            Format options with clear labels: <strong>A.</strong>, <strong>B.</strong>, <strong>C.</strong>, <strong>D.</strong> (or <strong>(A)</strong>, <strong>(B)</strong>).
+                            Provide the answer options below each question using the format:{" "}
+                            <code>A. Option 1</code>, <code>B. Option 2</code>, <code>C. Option 3</code>, <code>D. Option 4</code>.
                           </span>
                         </li>
 
@@ -388,7 +383,7 @@ const ExamQuestionUploadModal = ({
                             5
                           </span>
                           <span>
-                            Include an explicit <strong>Answer line</strong>: <code>Answer: B</code> or <code>Ans: C</code> after options.
+                            Include the correct answer using the format: <code>Answer: A</code>, <code>Answer: B</code>, <code>Answer: C</code>, or <code>Answer: D</code>.
                           </span>
                         </li>
 
@@ -397,7 +392,7 @@ const ExamQuestionUploadModal = ({
                             6
                           </span>
                           <span>
-                            Optionally provide an <strong>Explanation line</strong>: <code>Explanation: ...</code> for student post-exam review.
+                            An explanation may optionally be included using the format: <code>Explanation: &lt;Details&gt;</code>.
                           </span>
                         </li>
 
@@ -405,27 +400,28 @@ const ExamQuestionUploadModal = ({
                           <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
                             7
                           </span>
-                          <span>
-                            Preserve <strong>code indentation and line breaks</strong> in C syntax or output-prediction snippets.
-                          </span>
+                          <span>Keep each question, its options, correct answer, and optional explanation together.</span>
                         </li>
 
                         <li className="flex items-start gap-2">
                           <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
                             8
                           </span>
-                          <span>
-                            Provide at least <strong>2 to 4 distinct options</strong> per multiple-choice question.
-                          </span>
+                          <span>Preserve the original question numbering and order during PDF extraction.</span>
                         </li>
 
-                        <li className="flex items-start gap-2 sm:col-span-2">
-                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-700 text-[10px] font-bold mt-0.5">
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold mt-0.5">
                             9
                           </span>
-                          <span>
-                            Avoid <strong>scanned PDFs, photographs, blurry text</strong> and complex multi-column layouts.
+                          <span>If a question contains a code snippet, mathematical expression, or other special content, keep it clearly formatted within that question.</span>
+                        </li>
+
+                        <li className="flex items-start gap-2">
+                          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-700 text-[10px] font-bold mt-0.5">
+                            10
                           </span>
+                          <span>Avoid scanned PDFs, blurry text, handwritten content, and complex multi-column layouts.</span>
                         </li>
                       </ol>
                     ) : (
@@ -519,7 +515,7 @@ const ExamQuestionUploadModal = ({
                       <div>
                         <strong className="font-bold text-amber-800">Important Notice: </strong>
                         {isViva
-                          ? "Viva examinations are strictly MCQ-based. Provide sequential numbering (Q1..Qn), clearly labeled options (A-D), and explicit Answer keys (e.g., Answer: B) for instant, automated extraction. Questions without explicit answers will be flagged for faculty review."
+                          ? "Follow the recommended Viva Exam MCQ PDF format for accurate question extraction. Questions that cannot be extracted confidently should be flagged for faculty review."
                           : "For accurate extraction, please follow the recommended PDF question format. Questions that cannot be extracted confidently will be sent for faculty review."}
                       </div>
                     </div>
