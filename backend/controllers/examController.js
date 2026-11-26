@@ -1423,8 +1423,18 @@ export const getExamMonitoring = async (req, res, next) => {
           prog?.status !== "completed" &&
           prog?.status !== "successfully_completed";
 
+        const currentQStatus = qProg?.status || (assigned.length <= 1 ? prog?.status : "not_started");
+        const currentQConceptualStatus = qProg?.conceptualStatus || (assigned.length <= 1 ? prog?.conceptualStatus : "pending");
+
         const hasSubmittedConceptual = Boolean(
-          ans || (qProg?.lastConceptualAnswer && qProg.lastConceptualAnswer.trim().length > 20) || (assigned.length <= 1 && prog?.lastConceptualAnswer && prog.lastConceptualAnswer.trim().length > 20)
+          ans ||
+          currentQStatus === "awaiting_faculty_evaluation" ||
+          currentQConceptualStatus === "submitted" ||
+          currentQConceptualStatus === "evaluated" ||
+          currentQConceptualStatus === "approved" ||
+          currentQStatus === "evaluating" ||
+          currentQConceptualStatus === "evaluating" ||
+          currentQStatus === "waiting_faculty_decision"
         );
         const hasApprovedConceptual = Boolean(
           (ans && ans.isApproved) ||
@@ -1443,8 +1453,6 @@ export const getExamMonitoring = async (req, res, next) => {
           (exam.examType === "viva" || (hasApprovedConceptual && hasSubmittedCode && allTestsPassed));
 
         let notepadStatus = "Pending";
-        const currentQStatus = qProg?.status || (assigned.length <= 1 ? prog?.status : "not_started");
-        const currentQConceptualStatus = qProg?.conceptualStatus || (assigned.length <= 1 ? prog?.conceptualStatus : "pending");
 
         if (currentQStatus === "notepad_correction_required" || currentQConceptualStatus === "correction_required") {
           notepadStatus = "Correction Required";
@@ -1466,10 +1474,7 @@ export const getExamMonitoring = async (req, res, next) => {
 
         const latestError = ans?.aiEvaluation?.errorPercentage ?? qProg?.lastAIEvaluation?.errorPercentage ?? (assigned.length <= 1 ? prog?.lastAIEvaluation?.errorPercentage : null) ?? null;
 
-        if (currentQStatus === "evaluating" || currentQConceptualStatus === "evaluating") {
-          aiEvaluationStatus = "Evaluating...";
-          evaluationAction = "evaluating";
-        } else if (hasApprovedConceptual || (ans && ans.facultyDecision === "allow_to_code")) {
+        if (hasApprovedConceptual || (ans && ans.facultyDecision === "allow_to_code")) {
           aiEvaluationStatus = "Approved (Compiler Unlocked)";
           evaluationAction = "approved";
         } else if (currentQStatus === "notepad_correction_required" || currentQConceptualStatus === "correction_required" || (ans && ans.facultyDecision === "return_to_notepad")) {
@@ -1486,6 +1491,13 @@ export const getExamMonitoring = async (req, res, next) => {
             evaluationAction = "return_to_notepad";
             canReturnToNotepad = true;
           }
+        } else if (
+          ans?.status === "evaluating" ||
+          currentQStatus === "evaluating" ||
+          currentQConceptualStatus === "evaluating"
+        ) {
+          aiEvaluationStatus = "Evaluating...";
+          evaluationAction = "evaluating";
         } else if (hasSubmittedConceptual) {
           aiEvaluationStatus = "Waiting for Faculty Evaluation";
           evaluationAction = "evaluate";
@@ -1584,6 +1596,7 @@ export const getExamMonitoring = async (req, res, next) => {
           testCasesPassed: code?.testCasesPassed || 0,
           totalTestCases: code?.totalTestCases || 0,
           completedAt: qProg?.completedAt || prog?.completedAt || null,
+          submittedAt: ans?.submittedAt || qProg?.submittedAt || (assigned.length <= 1 ? prog?.submittedAt : null) || null,
           lastActivityTime,
           notepadStatus,
           aiEvaluationStatus,
@@ -1654,6 +1667,27 @@ export const getExamMonitoring = async (req, res, next) => {
         notStarted: rows.filter((r) => r.examStatus === "Not Started").length,
       };
     }
+
+    const getEvalPriority = (row) => {
+      if (row.evaluationAction === "evaluate") return 0;
+      if (
+        row.evaluationAction === "evaluating" ||
+        row.evaluationAction === "allow_to_code" ||
+        row.evaluationAction === "return_to_notepad"
+      ) {
+        return 1;
+      }
+      return 2;
+    };
+
+    rows.sort((a, b) => {
+      const pDiff = getEvalPriority(a) - getEvalPriority(b);
+      if (pDiff !== 0) return pDiff;
+      const aTime = a.submittedAt ? new Date(a.submittedAt).getTime() : 0;
+      const bTime = b.submittedAt ? new Date(b.submittedAt).getTime() : 0;
+      if (bTime !== aTime) return bTime - aTime;
+      return 0;
+    });
 
     const searchFilter = String(req.query?.search || "").trim().toLowerCase();
     const statusFilter = String(req.query?.status || "").trim();
@@ -3791,11 +3825,20 @@ export const facultyEvaluateStudentPaper = async (req, res, next) => {
       report: evaluationReport,
     });
   } catch (error) {
-    // Reset evaluating state on error
+    // Reset evaluating state on error (both top-level and per-question progress)
     try {
+      const resetFields = {
+        status: "awaiting_faculty_evaluation",
+        conceptualStatus: "submitted",
+      };
+      if (req.body?.questionId) {
+        const qKey = req.body.questionId.toString();
+        resetFields[`questionProgress.${qKey}.status`] = "awaiting_faculty_evaluation";
+        resetFields[`questionProgress.${qKey}.conceptualStatus`] = "submitted";
+      }
       await StudentExamProgress.updateOne(
         { examId: req.params.examId, studentId: req.params.studentId },
-        { status: "awaiting_faculty_evaluation", conceptualStatus: "submitted" }
+        { $set: resetFields }
       );
       await ExamAnswerSubmission.updateMany(
         { examId: req.params.examId, studentId: req.params.studentId, status: "evaluating" },

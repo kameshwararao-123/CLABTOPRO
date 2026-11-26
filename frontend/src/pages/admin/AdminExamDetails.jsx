@@ -297,6 +297,8 @@ const AdminExamDetails = () => {
         canAllowToCode: res.canAllowToCode,
         requiresRevision: res.requiresRevision,
         attemptNumber: res.attemptNumber,
+        facultyDecision: "pending",
+        isApproved: false,
         report: res.report,
       });
       setFacultyFeedbackInput(
@@ -360,6 +362,7 @@ const AdminExamDetails = () => {
         attemptNumber: latestSub?.attemptNumber || studentRow.conceptualAttemptsCount || 1,
         allAttempts: res.allAttempts || [],
         progress: res.progress,
+        facultyDecision: latestSub?.facultyDecision || res.progress?.facultyDecision || studentRow.facultyDecision || "pending",
         isApproved: Boolean(studentRow.conceptualApproved || res.progress?.compilerAllowed),
       });
       setFacultyFeedbackInput(
@@ -1517,7 +1520,7 @@ const AdminExamDetails = () => {
                                 {row.lastConceptualError < 50 ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
                                 {row.lastConceptualError}% Error ({row.lastConceptualError < 50 ? "PASS" : "FAIL"})
                               </span>
-                            ) : row.status === "evaluating" || evaluatingStudentId === row.studentId ? (
+                            ) : row.evaluationAction === "evaluating" || evaluatingStudentId === row.studentId ? (
                               <span className="inline-flex items-center gap-1 text-xs text-indigo-600 font-semibold">
                                 <Sparkles size={13} className="animate-spin" /> Evaluating...
                               </span>
@@ -1592,10 +1595,21 @@ const AdminExamDetails = () => {
                                   type="button"
                                   onClick={() => handleOpenReportModal(row)}
                                   className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold"
+                                  title="View AI evaluation report or change decision"
                                 >
-                                  Report
+                                  Change Decision
                                 </button>
                               </div>
+                            ) : row.evaluationAction === "not_submitted" ? (
+                              <button
+                                type="button"
+                                disabled
+                                title="Evaluate is enabled only after the student submits their answer"
+                                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-slate-100 text-slate-400 text-xs font-semibold cursor-not-allowed border border-slate-200"
+                              >
+                                <Sparkles size={13} className="text-slate-300" />
+                                Evaluate
+                              </button>
                             ) : (
                               <span className="text-xs text-slate-400 font-medium">Waiting</span>
                             )}
@@ -1972,11 +1986,15 @@ const AdminExamDetails = () => {
                 </div>
               )}
 
-              {/* Faculty Feedback input if returning to notepad */}
-              {conceptualReportModal.requiresRevision && (
+              {/* Faculty Feedback input for returning to notepad (or changing decision to Return to Notepad) */}
+              {(conceptualReportModal.requiresRevision ||
+                conceptualReportModal.isApproved ||
+                conceptualReportModal.facultyDecision === "allow_to_code" ||
+                conceptualReportModal.facultyDecision === "return_to_notepad" ||
+                conceptualReportModal.canAllowToCode) && (
                 <div className="space-y-1.5 pt-2">
                   <label className="text-xs font-bold text-slate-700 block">
-                    Faculty Revision Note (Visible to Student):
+                    Faculty Revision Note (Visible to Student if Returned to Notepad):
                   </label>
                   <textarea
                     rows={2}
@@ -1989,36 +2007,18 @@ const AdminExamDetails = () => {
               )}
             </div>
 
-            {/* Modal Footer with Conditional Faculty Actions */}
-            <div className="flex items-center justify-between pt-4 border-t border-slate-100 flex-shrink-0">
+            {/* Modal Footer with Faculty Decision & Change-Decision Actions */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-4 border-t border-slate-100 flex-shrink-0">
               <button
                 type="button"
                 onClick={() => setConceptualReportModal(null)}
                 className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition"
               >
-                Close
+                Back / Close
               </button>
 
-              <div className="flex items-center gap-2">
-                {/* Condition B: Error >= 50% -> Return to Notepad */}
-                {conceptualReportModal.requiresRevision ? (
-                  <button
-                    type="button"
-                    disabled={decisionLoading}
-                    onClick={() =>
-                      handleFacultyReturnToNotepad(
-                        conceptualReportModal.studentId,
-                        conceptualReportModal.questionId,
-                        facultyFeedbackInput
-                      )
-                    }
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 px-5 py-2 text-xs font-bold text-white shadow-xs transition disabled:opacity-50"
-                  >
-                    <RotateCcw size={14} />
-                    Return to Notepad
-                  </button>
-                ) : (
-                  /* Condition A: Error < 50% -> Allow to Code */
+              <div className="flex flex-wrap items-center gap-2">
+                {!conceptualReportModal.requiresRevision && (
                   <button
                     type="button"
                     disabled={decisionLoading}
@@ -2031,9 +2031,33 @@ const AdminExamDetails = () => {
                     className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-5 py-2 text-xs font-bold text-white shadow-xs transition disabled:opacity-50"
                   >
                     <Check size={14} />
-                    Allow to Code
+                    {conceptualReportModal.facultyDecision === "return_to_notepad"
+                      ? "Change Decision: Allow to Code"
+                      : "Allow to Code"}
                   </button>
                 )}
+
+                <button
+                  type="button"
+                  disabled={decisionLoading}
+                  onClick={() =>
+                    handleFacultyReturnToNotepad(
+                      conceptualReportModal.studentId,
+                      conceptualReportModal.questionId,
+                      facultyFeedbackInput
+                    )
+                  }
+                  className={`inline-flex items-center gap-1.5 rounded-xl px-5 py-2 text-xs font-bold shadow-xs transition disabled:opacity-50 ${
+                    conceptualReportModal.requiresRevision
+                      ? "bg-amber-600 hover:bg-amber-700 text-white"
+                      : "border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800"
+                  }`}
+                >
+                  <RotateCcw size={14} />
+                  {conceptualReportModal.isApproved || conceptualReportModal.facultyDecision === "allow_to_code"
+                    ? "Change Decision: Return to Notepad"
+                    : "Return to Notepad"}
+                </button>
               </div>
             </div>
           </div>

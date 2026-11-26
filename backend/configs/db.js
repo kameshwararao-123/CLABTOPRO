@@ -2,14 +2,26 @@ import dns from "dns";
 import mongoose from "mongoose";
 import { logger } from "../utils/logger.js";
 
-// Only override system DNS if explicitly requested via FORCE_PUBLIC_DNS=true
-if (process.env.FORCE_PUBLIC_DNS === "true") {
+const applyPublicDnsFallback = (reason) => {
   try {
     dns.setServers(["8.8.8.8", "1.1.1.1", "8.8.4.4"]);
+    logger.info("Applied public DNS servers for MongoDB SRV resolution", { reason });
+    return true;
   } catch (dnsErr) {
     logger.warn("Could not set custom DNS servers", { error: dnsErr.message });
+    return false;
   }
-}
+};
+
+const isDnsSrvError = (error) => {
+  const msg = String(error?.message || "");
+  return (
+    msg.includes("querySrv") ||
+    msg.includes("ECONNREFUSED") ||
+    msg.includes("ETIMEOUT") ||
+    msg.includes("ENOTFOUND")
+  );
+};
 
 let listenersRegistered = false;
 let activeConnectPromise = null;
@@ -91,11 +103,16 @@ const connectDB = async ({ maxRetries = 3, retryDelayMs = 2000 } = {}) => {
     throw new Error("MONGODB_URI is not defined in environment");
   }
 
+  if (process.env.FORCE_PUBLIC_DNS === "true") {
+    applyPublicDnsFallback("FORCE_PUBLIC_DNS=true");
+  }
+
   registerConnectionListeners();
   const options = getMongoConnectOptions();
 
   activeConnectPromise = (async () => {
     let lastError = null;
+    let publicDnsApplied = process.env.FORCE_PUBLIC_DNS === "true";
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         await mongoose.connect(uri, options);
@@ -111,6 +128,11 @@ const connectDB = async ({ maxRetries = 3, retryDelayMs = 2000 } = {}) => {
           maxAttempts: maxRetries + 1,
           error: error.message,
         });
+
+        // If SRV/DNS lookup failed on a mongodb+srv URI, automatically fall back to public DNS before retrying
+        if (!publicDnsApplied && uri.startsWith("mongodb+srv://") && isDnsSrvError(error)) {
+          publicDnsApplied = applyPublicDnsFallback(error.message);
+        }
 
         if (attempt < maxRetries) {
           await new Promise((resolve) => setTimeout(resolve, retryDelayMs));

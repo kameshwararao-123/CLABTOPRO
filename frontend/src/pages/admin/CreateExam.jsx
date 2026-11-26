@@ -30,7 +30,6 @@ const CreateExam = () => {
       initialType === "viva"
         ? "1. This is an AI-powered Multiple Choice Viva Examination.\n2. Read each question carefully and select the best option.\n3. You can navigate freely between questions using the question palette.\n4. You can mark questions for review and return to them later.\n5. Your answers are automatically saved as you select them.\n6. Do not switch tabs or minimize the window during the examination."
         : "1. Do not switch tabs or minimize the examination window during the test.\n2. Write your conceptual solution, algorithm, and logic in the Paper Writing Notepad.\n3. You must score an error percentage below 50% on AI conceptual evaluation to unlock the code execution environment.\n4. Complete and test all visible test cases before submitting your final code.",
-    maxConceptualAttempts: 3,
     status: "draft",
   });
 
@@ -465,25 +464,6 @@ const CreateExam = () => {
                     required
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-800 outline-none transition focus:border-indigo-500 focus:bg-white font-mono"
                   />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
-                    Max Conceptual Attempts Allowed
-                  </label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="10"
-                    name="maxConceptualAttempts"
-                    value={form.maxConceptualAttempts}
-                    onChange={handleChange}
-                    required
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-800 outline-none transition focus:border-indigo-500 focus:bg-white font-mono"
-                  />
-                  <p className="mt-1 text-[11px] text-slate-400">
-                    Number of AI paper evaluation submissions permitted per student before requiring faculty override.
-                  </p>
                 </div>
               </div>
 
