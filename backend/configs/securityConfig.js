@@ -13,5 +13,5 @@
  */
 export const PHASE3_SECURITY_ENABLED =
   typeof process !== "undefined" && process.env?.PHASE3_SECURITY_ENABLED !== undefined
-    ? process.env.PHASE3_SECURITY_ENABLED === "true" || process.env.PHASE3_SECURITY_ENABLED === true
-    : false;
+    ? process.env.PHASE3_SECURITY_ENABLED !== "false" && process.env.PHASE3_SECURITY_ENABLED !== false
+    : true;

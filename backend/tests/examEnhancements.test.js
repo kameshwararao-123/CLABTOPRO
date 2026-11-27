@@ -106,10 +106,9 @@ test("2. logExamSecurityEvent respects PHASE3_SECURITY_ENABLED toggle", async ()
 
   await logExamSecurityEvent(req, res, () => {});
 
-  // Since PHASE3_SECURITY_ENABLED is false by default, no new audit log is created and disabled is returned
+  // Since PHASE3_SECURITY_ENABLED is true by default, security audit log is recorded
   assert.equal(res.statusCode, 200);
-  assert.equal(res.data.disabled, true);
-  assert.equal(loggedAction, null, "Should not record new security audit log when PHASE3_SECURITY_ENABLED is false");
+  assert.equal(loggedAction, "SECURITY_EVENT_TAB_SWITCH_HIDDEN");
 
   ExamAuditLog.create = originalCreate;
 });

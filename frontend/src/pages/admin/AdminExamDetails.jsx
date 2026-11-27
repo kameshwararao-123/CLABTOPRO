@@ -91,7 +91,6 @@ const AdminExamDetails = () => {
   const [evaluatingRowId, setEvaluatingRowId] = useState(null);
   const [conceptualReportModal, setConceptualReportModal] = useState(null);
   const [notepadReportModal, setNotepadReportModal] = useState(null);
-  const [codeReportModal, setCodeReportModal] = useState(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [decisionLoading, setDecisionLoading] = useState(false);
   const [facultyFeedbackInput, setFacultyFeedbackInput] = useState("");
@@ -534,52 +533,6 @@ const AdminExamDetails = () => {
       });
     } catch (err) {
       setErrorMsg(err.response?.data?.message || "Failed to load Notepad report.");
-    } finally {
-      setReportLoading(false);
-    }
-  };
-
-  const handleOpenCodeReport = async (studentRow) => {
-    try {
-      setReportLoading(true);
-      setErrorMsg("");
-      const res = await getStudentConceptualReport(
-        examId,
-        studentRow.studentId,
-        studentRow.targetQuestionId
-      );
-      const targetQ = res.question || res.latestSubmission?.questionId;
-      const codeSub = res.latestCodeSubmission || null;
-      const qKey = studentRow.targetQuestionId ? String(studentRow.targetQuestionId) : null;
-      const fallbackProgCode =
-        (qKey && res.progress?.questionProgress?.[qKey]?.currentCode) ||
-        res.progress?.currentCode ||
-        null;
-      const resolvedCode = codeSub?.code || (fallbackProgCode && fallbackProgCode.trim() ? fallbackProgCode : null);
-
-      setCodeReportModal({
-        studentId: studentRow.studentId,
-        studentName: res.student?.username || studentRow.username,
-        rollNo: res.student?.rollNo || studentRow.rollNo || "—",
-        questionNumber: targetQ?.questionNumber || studentRow.questionNumber || "Q1",
-        questionTitle: targetQ?.title || studentRow.questionTitle || studentRow.assignedQuestion,
-        hasSubmission: Boolean(resolvedCode),
-        code: resolvedCode,
-        language: codeSub?.language || "c",
-        status: codeSub?.status || null,
-        testCasesPassed: codeSub?.testCasesPassed ?? 0,
-        totalTestCases: codeSub?.totalTestCases ?? 0,
-        testCasesFailed: Math.max(
-          0,
-          (codeSub?.totalTestCases ?? 0) - (codeSub?.testCasesPassed ?? 0)
-        ),
-        allPassed: Boolean(codeSub?.allPassed),
-        testCaseResults: codeSub?.testCaseResults || [],
-        compilerOutput: codeSub?.compilerOutput || "",
-        submittedAt: codeSub?.submittedAt || null,
-      });
-    } catch (err) {
-      setErrorMsg(err.response?.data?.message || "Failed to load Code Editor report.");
     } finally {
       setReportLoading(false);
     }
@@ -2018,17 +1971,6 @@ const AdminExamDetails = () => {
                               <Eye size={12} />
                               Details
                             </button>
-                            {(isExamEndedForReports || (row.codeStatus && row.codeStatus !== "not_submitted") || row.isQuestionSolved) && (
-                              <button
-                                type="button"
-                                onClick={() => handleOpenCodeReport(row)}
-                                className="ml-1.5 inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100 text-emerald-700 text-[11px] font-semibold transition"
-                                title="View student's latest Code Editor submission"
-                              >
-                                <FileCode size={12} />
-                                Code Report
-                              </button>
-                            )}
                           </td>
                         </tr>
                         );
@@ -3292,123 +3234,6 @@ const AdminExamDetails = () => {
               <button
                 type="button"
                 onClick={() => setNotepadReportModal(null)}
-                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Post-Exam Code Editor Report Modal (Per Student & Question) */}
-      {codeReportModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 my-8 max-h-[92vh] flex flex-col">
-            <div className="flex justify-between items-start pb-4 border-b border-slate-100 flex-shrink-0">
-              <div>
-                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                  <FileCode size={18} className="text-emerald-600" />
-                  Code Editor Report
-                </h3>
-                <p className="text-xs text-slate-500 mt-1">
-                  Student: <strong className="text-slate-700">{codeReportModal.studentName}</strong> ({codeReportModal.rollNo}) •
-                  Question: <strong className="text-slate-700">{codeReportModal.questionNumber} – {codeReportModal.questionTitle}</strong>
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setCodeReportModal(null)}
-                className="text-slate-400 hover:text-slate-600 rounded-lg p-1 transition"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="overflow-y-auto flex-1 pr-1 py-4 space-y-4">
-              {codeReportModal.hasSubmission ? (
-                <>
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                    <div className="flex items-center gap-2">
-                      <span className="px-2.5 py-1 rounded bg-slate-100 text-slate-700 font-mono font-bold uppercase border border-slate-200">
-                        Language: {codeReportModal.language || "c"}
-                      </span>
-                      <span
-                        className={`px-2.5 py-1 rounded-full font-mono font-bold border ${
-                          codeReportModal.allPassed
-                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                            : "bg-rose-50 text-rose-700 border-rose-200"
-                        }`}
-                      >
-                        Test Cases Passed: {codeReportModal.testCasesPassed}/{codeReportModal.totalTestCases}
-                      </span>
-                      <span className="px-2.5 py-1 rounded-full font-mono font-semibold bg-slate-100 text-slate-700 border border-slate-200">
-                        Failed Test Cases: {codeReportModal.testCasesFailed}
-                      </span>
-                    </div>
-                    {codeReportModal.submittedAt && (
-                      <span className="text-slate-500 font-mono">
-                        {new Date(codeReportModal.submittedAt).toLocaleString()}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">
-                      Latest Submitted Source Code
-                    </span>
-                    <pre className="p-4 rounded-xl bg-slate-950 text-slate-100 font-mono text-xs max-h-72 overflow-auto whitespace-pre leading-relaxed border border-slate-800 select-text">
-                      <code>{codeReportModal.code}</code>
-                    </pre>
-                  </div>
-
-                  {codeReportModal.compilerOutput && (
-                    <div className="space-y-1.5">
-                      <span className="text-xs font-bold uppercase tracking-wider text-rose-600 block">
-                        Compiler / Execution Output
-                      </span>
-                      <pre className="p-3 rounded-xl bg-rose-950/90 text-rose-200 font-mono text-[11px] max-h-32 overflow-auto whitespace-pre-wrap border border-rose-900">
-                        {codeReportModal.compilerOutput}
-                      </pre>
-                    </div>
-                  )}
-
-                  {codeReportModal.testCaseResults?.length > 0 && (
-                    <div className="space-y-1.5">
-                      <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">
-                        Individual Test Case Results
-                      </span>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                        {codeReportModal.testCaseResults.map((tc, tIdx) => (
-                          <div
-                            key={tIdx}
-                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono border flex items-center justify-between ${
-                              tc.status === "passed"
-                                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                : "bg-rose-50 text-rose-700 border-rose-200"
-                            }`}
-                          >
-                            <span>Test #{tc.testCaseNumber}</span>
-                            <span className="font-bold uppercase">
-                              {tc.status === "passed" ? "Passed" : String(tc.status || "failed").replace(/_/g, " ")}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="p-4 rounded-xl bg-slate-50 text-slate-500 text-xs font-medium border border-slate-200">
-                  No code submitted
-                </div>
-              )}
-            </div>
-
-            <div className="flex justify-end pt-3 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setCodeReportModal(null)}
                 className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition"
               >
                 Close

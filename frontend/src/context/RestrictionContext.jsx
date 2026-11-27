@@ -50,16 +50,22 @@ export const RestrictionProvider = ({ children }) => {
       return;
     }
 
-    // 1. Detect Browser Tab Switch or Window Minimize
+    // 1. Detect Browser Tab Switch or Window Minimize (only during an active exam route)
+    const isActiveExamRoute = () =>
+      typeof window !== "undefined" &&
+      /^\/exams\/[^/]+\/(?:paper|code|viva|question)\b/i.test(window.location.pathname);
+
     const handleVisibilityChange = () => {
-      if (document.hidden) {
+      if (document.hidden && isActiveExamRoute()) {
         triggerViolation("Browser Tab Switched or Window Minimized");
       }
     };
 
     // 2. Detect Application Switch (Alt+Tab, background apps, clicking another window/screen)
     const handleWindowBlur = () => {
-      triggerViolation("Application Switched (Window Lost Focus)");
+      if (isActiveExamRoute()) {
+        triggerViolation("Application Switched (Window Lost Focus)");
+      }
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);

@@ -11,5 +11,5 @@
  */
 export const PHASE3_SECURITY_ENABLED =
   typeof import.meta !== "undefined" && import.meta.env?.VITE_PHASE3_SECURITY_ENABLED !== undefined
-    ? import.meta.env.VITE_PHASE3_SECURITY_ENABLED === "true" || import.meta.env.VITE_PHASE3_SECURITY_ENABLED === true
-    : false;
+    ? import.meta.env.VITE_PHASE3_SECURITY_ENABLED !== "false" && import.meta.env.VITE_PHASE3_SECURITY_ENABLED !== false
+    : true;
