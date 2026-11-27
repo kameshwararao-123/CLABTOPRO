@@ -9,30 +9,34 @@ import {
   validateAndScoreGeminiResponse,
 } from "../services/examAIService.js";
 
-test("1. Default AI Evaluation Rubric uses Algorithmic Approach (50%) and Code Logic & Correctness (50%)", () => {
+test("1. Default AI Evaluation Rubric uses Algorithmic Approach (40%), Code Logic, Correctness & Syntax (55%), and Expected Output (5%)", () => {
   const q = { title: "Sum of Array", problemStatement: "Compute sum of N numbers.", marks: 100 };
   const norm = normalizeAndValidateRubric(q);
 
-  assert.equal(norm.criteria.length, 2);
+  assert.equal(norm.criteria.length, 3);
   assert.equal(norm.criteria[0].criterion, "Algorithmic Approach");
-  assert.equal(norm.criteria[0].maximumMarks, 50);
-  assert.equal(norm.criteria[1].criterion, "Code Logic & Correctness");
-  assert.equal(norm.criteria[1].maximumMarks, 50);
+  assert.equal(norm.criteria[0].maximumMarks, 40);
+  assert.equal(norm.criteria[1].criterion, "Code Logic, Correctness & Syntax");
+  assert.equal(norm.criteria[1].maximumMarks, 55);
+  assert.equal(norm.criteria[2].criterion, "Expected Output");
+  assert.equal(norm.criteria[2].maximumMarks, 5);
   assert.equal(norm.totalMaximumMarks, 100);
 });
 
-test("2. ExamQuestion schema defaults to the two-category 50/50 rubric", () => {
+test("2. ExamQuestion schema defaults to the three-category 40/55/5 rubric", () => {
   const q = new ExamQuestion({
     examId: new mongoose.Types.ObjectId(),
     title: "Reverse Linked List",
     problemStatement: "Reverse a singly linked list.",
     marks: 100,
   });
-  assert.equal(q.evaluationRubric.length, 2);
+  assert.equal(q.evaluationRubric.length, 3);
   assert.equal(q.evaluationRubric[0].criterion, "Algorithmic Approach");
-  assert.equal(q.evaluationRubric[0].weight, 50);
-  assert.equal(q.evaluationRubric[1].criterion, "Code Logic & Correctness");
-  assert.equal(q.evaluationRubric[1].weight, 50);
+  assert.equal(q.evaluationRubric[0].weight, 40);
+  assert.equal(q.evaluationRubric[1].criterion, "Code Logic, Correctness & Syntax");
+  assert.equal(q.evaluationRubric[1].weight, 55);
+  assert.equal(q.evaluationRubric[2].criterion, "Expected Output");
+  assert.equal(q.evaluationRubric[2].weight, 5);
 });
 
 test("3. buildEvaluationPrompt instructs flexible section order, edge cases, expected output, and syntax vs logic", () => {
@@ -45,8 +49,9 @@ test("3. buildEvaluationPrompt instructs flexible section order, edge cases, exp
   });
 
   assert.ok(prompt.includes("ANY ORDER"));
-  assert.ok(prompt.includes("Algorithmic Approach (Max Marks: 50)"));
-  assert.ok(prompt.includes("Code Logic & Correctness (Max Marks: 50)"));
+  assert.ok(prompt.includes("Algorithmic Approach (Max Marks: 40)"));
+  assert.ok(prompt.includes("Code Logic, Correctness & Syntax (Max Marks: 55)"));
+  assert.ok(prompt.includes("Expected Output (Max Marks: 5)"));
   assert.ok(prompt.includes("logical errors from minor syntax errors"));
 });
 
@@ -62,11 +67,11 @@ test("4. Fallback evaluation handles different answer section orders consistentl
 
   assert.equal(eval1.maximumMarks, 100);
   assert.equal(eval2.maximumMarks, 100);
-  assert.equal(eval1.criteriaEvaluation.length, 2);
-  assert.equal(eval2.criteriaEvaluation.length, 2);
+  assert.equal(eval1.criteriaEvaluation.length, 3);
+  assert.equal(eval2.criteriaEvaluation.length, 3);
 });
 
-test("5. Legacy 5-category DB rubric is automatically normalized to the new 2-category 50/50 rubric", () => {
+test("5. Legacy 5-category and 2-category DB rubrics are automatically normalized to the new 3-category 40/55/5 rubric", () => {
   const legacyQuestion = {
     title: "Legacy Question",
     marks: 100,
@@ -79,11 +84,27 @@ test("5. Legacy 5-category DB rubric is automatically normalized to the new 2-ca
     ],
   };
   const norm = normalizeAndValidateRubric(legacyQuestion);
-  assert.equal(norm.criteria.length, 2);
+  assert.equal(norm.criteria.length, 3);
   assert.equal(norm.criteria[0].criterion, "Algorithmic Approach");
-  assert.equal(norm.criteria[0].maximumMarks, 50);
-  assert.equal(norm.criteria[1].criterion, "Code Logic & Correctness");
-  assert.equal(norm.criteria[1].maximumMarks, 50);
+  assert.equal(norm.criteria[0].maximumMarks, 40);
+  assert.equal(norm.criteria[1].criterion, "Code Logic, Correctness & Syntax");
+  assert.equal(norm.criteria[1].maximumMarks, 55);
+  assert.equal(norm.criteria[2].criterion, "Expected Output");
+  assert.equal(norm.criteria[2].maximumMarks, 5);
+
+  const legacyTwoCat = {
+    title: "Legacy 50/50 Question",
+    marks: 100,
+    evaluationRubric: [
+      { criterion: "Algorithmic Approach", weight: 50 },
+      { criterion: "Code Logic & Correctness", weight: 50 },
+    ],
+  };
+  const norm2 = normalizeAndValidateRubric(legacyTwoCat);
+  assert.equal(norm2.criteria.length, 3);
+  assert.equal(norm2.criteria[0].maximumMarks, 40);
+  assert.equal(norm2.criteria[1].maximumMarks, 55);
+  assert.equal(norm2.criteria[2].maximumMarks, 5);
 });
 
 test("6. Fallback evaluation awards marks for valid algorithm, C code, and expected output without written explanations", () => {
@@ -125,9 +146,10 @@ Reversed number = 54321`;
   assert.equal(result.maximumMarks, 10);
   assert.ok(result.totalMarks > 0, `Expected totalMarks > 0, got ${result.totalMarks}`);
   assert.ok(result.errorPercentage < 50, `Expected errorPercentage < 50, got ${result.errorPercentage}`);
-  assert.equal(result.criteriaEvaluation.length, 2);
+  assert.equal(result.criteriaEvaluation.length, 3);
   assert.ok(result.criteriaEvaluation[0].awardedMarks > 0);
   assert.ok(result.criteriaEvaluation[1].awardedMarks > 0);
+  assert.ok(result.criteriaEvaluation[2].awardedMarks > 0);
 
   const allText = JSON.stringify(result);
   assert.equal(allText.includes("Missing explanation"), false);
@@ -214,8 +236,9 @@ int main() {
     studentAnswer: noOutputAns,
     parsed: {
       criteriaEvaluation: [
-        { criterion: "Algorithmic Approach", maximumMarks: 50, awardedMarks: 50, status: "fully_satisfied", evidence: "Steps", feedback: "Good" },
-        { criterion: "Code Logic & Correctness", maximumMarks: 50, awardedMarks: 50, status: "fully_satisfied", evidence: "Code", feedback: "Good" },
+        { criterion: "Algorithmic Approach", maximumMarks: 40, awardedMarks: 40, status: "fully_satisfied", evidence: "Steps", feedback: "Good" },
+        { criterion: "Code Logic, Correctness & Syntax", maximumMarks: 55, awardedMarks: 55, status: "fully_satisfied", evidence: "Code", feedback: "Good" },
+        { criterion: "Expected Output", maximumMarks: 5, awardedMarks: 5, status: "fully_satisfied", evidence: "Output", feedback: "Good" },
       ],
       correctConcepts: ["Loop logic"],
       missingConcepts: ["Expected Output"],

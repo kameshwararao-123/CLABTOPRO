@@ -286,17 +286,6 @@ const ExamAssignedQuestion = () => {
               </div>
             </div>
           )}
-
-          {/* AI Rubric Overview */}
-          <div className="p-4 rounded-xl bg-indigo-500/10 border border-indigo-400/20 space-y-2">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-1.5">
-              <ShieldCheck className="w-4 h-4 text-indigo-400" /> Conceptual Evaluation Criteria
-            </h3>
-            <p className="text-xs text-indigo-200/80">
-              Your paper answer will be evaluated against: Algorithmic Approach (50%) and Code Logic &amp; Correctness (50%). Students are not required to provide written explanations; evaluation is based on the correctness of the algorithm steps, code logic, and expected output.
-              You must achieve an error rate <strong className="text-white">below 50%</strong> to unlock the code compiler for this question.
-            </p>
-          </div>
         </div>
 
         {/* Footer Navigation */}

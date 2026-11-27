@@ -193,13 +193,18 @@ const examQuestionSchema = new mongoose.Schema(
       default: () => [
         {
           criterion: "Algorithmic Approach",
-          weight: 50,
-          description: "Correct problem-solving approach, logical sequence of steps, algorithm selection, conditions/iterations, and edge case handling",
+          weight: 40,
+          description: "Logically correct problem-solving approach, correct operations and sequence, conditions/iterations, and edge case handling",
         },
         {
-          criterion: "Code Logic & Correctness",
-          weight: 50,
-          description: "Correct implementation of algorithm, conditions, loops, calculations, data handling, program flow, edge cases, and expected output consistency",
+          criterion: "Code Logic, Correctness & Syntax",
+          weight: 55,
+          description: "Correct code implementation of the algorithm, conditions, loops, calculations, program flow, edge cases, and syntax/compilation correctness",
+        },
+        {
+          criterion: "Expected Output",
+          weight: 5,
+          description: "Presence and correctness of expected output for the given input, matching the intended algorithm and code logic",
         },
       ],
     },

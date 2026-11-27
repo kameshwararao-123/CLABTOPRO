@@ -15,15 +15,21 @@
 const DEFAULT_RUBRIC = [
   {
     criterion: "Algorithmic Approach",
-    weight: 50,
+    weight: 40,
     description:
-      "Correct problem-solving approach, logical sequence of steps, appropriate algorithm selection, handling of conditions/iterations, and edge cases (min/max, zero/negative, duplicates, boundaries)",
+      "Logically correct problem-solving approach, correct operations and sequence, conditions/iterations, and edge case handling",
   },
   {
-    criterion: "Code Logic & Correctness",
-    weight: 50,
+    criterion: "Code Logic, Correctness & Syntax",
+    weight: 55,
     description:
-      "Correct implementation of algorithm, conditions, loops, calculations, data handling, program flow, edge cases, and consistency with expected output",
+      "Correct code implementation of the algorithm, conditions, loops, calculations, program flow, edge cases, and syntax/compilation correctness",
+  },
+  {
+    criterion: "Expected Output",
+    weight: 5,
+    description:
+      "Presence and correctness of expected output for the given input, matching the intended algorithm and code logic",
   },
 ];
 
@@ -86,13 +92,19 @@ export const normalizeAndValidateRubric = (question = {}) => {
   const rawRubric = Array.isArray(question.evaluationRubric) ? question.evaluationRubric : [];
   const questionMaxMarks = Number(question.marks) > 0 ? Number(question.marks) : 10;
 
-  const hasDeprecatedDefault = rawRubric.some((r) =>
-    DEPRECATED_DEFAULT_CRITERIA.has(String(r?.criterion || "").trim().toLowerCase())
-  );
+  const hasDeprecatedDefault =
+    rawRubric.some((r) =>
+      DEPRECATED_DEFAULT_CRITERIA.has(String(r?.criterion || "").trim().toLowerCase())
+    ) ||
+    (rawRubric.length === 2 &&
+      rawRubric.some((r) => String(r?.criterion || "").trim().toLowerCase() === "algorithmic approach" && Number(r?.weight) === 50) &&
+      rawRubric.some((r) => String(r?.criterion || "").trim().toLowerCase() === "code logic & correctness" && Number(r?.weight) === 50));
 
   if (rawRubric.length === 0 || hasDeprecatedDefault) {
     if (rawRubric.length === 0) {
-      rubricWarnings.push("No faculty rubric provided; using default 2-category rubric (Algorithmic Approach 50%, Code Logic & Correctness 50%).");
+      rubricWarnings.push(
+        "No faculty rubric provided; using default 3-category rubric (Algorithmic Approach 40%, Code Logic, Correctness & Syntax 55%, Expected Output 5%)."
+      );
     }
     const criteria = DEFAULT_RUBRIC.map((r) => ({
       criterion: r.criterion,
@@ -205,25 +217,21 @@ Your task is to evaluate HOW THE STUDENT THINKS AND SOLVES THE PROGRAMMING PROBL
 3. The Faculty-Provided Evaluation Rubric (the PRIMARY authority for awarding marks)
 
 CRITICAL EVALUATION RULES:
-1. EVALUATE ACTUAL CORRECTNESS (NO AUTOMATIC FULL MARKS):
-   - Independently evaluate: (1) Algorithm, (2) Source Code, and (3) Expected Output against the Original Question.
-   - NEVER award 100% or full marks merely because the Notepad contains headings, text, or all three sections.
-   - Students are NOT required to write prose explanations; evaluate the correctness of their actual algorithm steps, code logic, and expected output directly.
-   - Score Algorithmic Approach (50 marks) on whether the algorithm correctly solves the given problem, uses logically correct steps in sequence, handles required conditions/iterations, and handles edge cases. Deduct marks for incorrect steps, missing operations, or wrong approach.
-   - Score Code Logic & Correctness (50 marks) on whether the code implements the intended algorithm, uses correct conditions/loops/calculations/variables, produces the required result, and has no syntax/compilation-blocking errors.
-2. EXPECTED OUTPUT VALIDATION (REQUIRED FOR FULL MARKS):
-   - Expected Output is required as part of the student's conceptual answer. Do NOT create a separate scoring category for it; use it as supporting evidence within the two existing rubric categories.
-   - Verify Expected Output against the problem requirements, the student's algorithm, and the student's source code.
-   - If Expected Output is missing, incorrect, incomplete, or inconsistent with the code, NEVER award 100/100; deduct appropriate marks from Code Logic & Correctness / Algorithmic Approach based on completeness and correctness.
-3. FLEXIBLE NOTEPAD ANSWER ORDER:
+1. EVALUATE ACTUAL CORRECTNESS AGAINST THE 3-CATEGORY RUBRIC (40 + 55 + 5 = 100):
+   - Independently evaluate: (1) Algorithmic Approach (40 Marks), (2) Code Logic, Correctness & Syntax (55 Marks), and (3) Expected Output (5 Marks) against the Original Question.
+   - NEVER award 100% or full marks merely because the Notepad contains headings, multiple steps, or all three sections.
+   - Students are NOT required to write lengthy prose explanations. If a student writes a short algorithm with correct logic, award appropriate marks even if the algorithm has very few steps; if the algorithm has incorrect logic, deduct marks according to severity regardless of step count.
+   - Score Algorithmic Approach (40 marks) on actual algorithmic logic correctness, sequence of operations, conditions/iterations, and edge cases.
+   - Score Code Logic, Correctness & Syntax (55 marks) on whether the code implements the correct algorithm, conditions, loops, calculations, edge cases, AND syntax/compilation correctness. Deduct for both logical errors and syntax/compilation-blocking mistakes; if code logic is sound with minor syntax mistakes, award partial marks rather than 0.
+   - Score Expected Output (5 marks) separately on whether Expected Output is present, correct for the given input, and consistent with the algorithm and code logic. Deduct or award 0/5 if missing or incorrect.
+2. FLEXIBLE NOTEPAD ANSWER ORDER:
    - Students may write Algorithm, Source Code, and Expected Output in ANY ORDER, with or without headings.
    - Identify each section by its content, NOT its position, and NEVER penalize section ordering or formatting alone.
-4. DISTINGUISH SYNTAX ERRORS FROM LOGICAL ERRORS:
+3. DISTINGUISH SYNTAX ERRORS FROM LOGICAL ERRORS:
    - Clearly distinguish logical errors from minor syntax errors in your feedback.
-   - Do NOT treat every minor syntax error as a logical error, and do NOT automatically award 0 when code logic is sound but has a minor syntax issue—award appropriate partial marks.
-   - However, NEVER award full marks (50/50 or 100/100) when the code contains syntax errors or compilation-blocking mistakes; deduct marks under Code Logic & Correctness according to impact.
-5. MANDATORY VALIDATION BEFORE AWARDING 100/100:
-   - Award 100/100 ONLY when ALL are verified with evidence: (a) algorithm correctly solves the problem, (b) source code implements the algorithm correctly, (c) no significant syntax or compilation errors, (d) code produces the required result, (e) Expected Output is present and correct, and (f) relevant edge cases are handled.
+   - Never award full marks for Code Logic, Correctness & Syntax when syntax/compilation errors or logical bugs are present.
+4. MANDATORY VALIDATION BEFORE AWARDING 100/100:
+   - Award 100/100 ONLY when ALL are verified with evidence: (a) algorithm logic correctly solves the problem (40/40), (b) source code implements the algorithm with no syntax or logical errors (55/55), (c) Expected Output is present and correct (5/5), and (d) relevant edge cases are handled.
 6. STRICT RUBRIC ADHERENCE & CRITERION-BY-CRITERION SCORING:
    - Evaluate EVERY criterion in the faculty rubric independently.
    - Do NOT invent new rubric criteria and do NOT change any criterion's maximumMarks.
@@ -757,7 +765,7 @@ export const generateConceptualFallback = ({
   }
   for (const synErr of syntaxErrors) {
     identifiedIssues.push({
-      criterion: "Code Logic & Correctness",
+      criterion: "Code Logic, Correctness & Syntax",
       severity: syntaxErrors.length >= 2 ? "major" : "minor",
       description: `Syntax error: ${synErr}`,
       hint: "Fix syntax/compilation issues while keeping the underlying logic intact.",
@@ -770,8 +778,8 @@ export const generateConceptualFallback = ({
     missingConcepts.push("Expected Output");
     improvementSuggestions.push("Provide the Expected Output matching your algorithm and code.");
     identifiedIssues.push({
-      criterion: "Code Logic & Correctness",
-      severity: "minor",
+      criterion: "Expected Output",
+      severity: "major",
       description: "Missing Expected Output for verification.",
       hint: "Include the Expected Output for sample input.",
     });
@@ -779,65 +787,70 @@ export const generateConceptualFallback = ({
 
   for (const crit of normalizedRubric.criteria) {
     const critLower = crit.criterion.toLowerCase();
-    const isAlgoCriterion = /algorithm|approach/.test(critLower);
-    const isCodeLogicCriterion = /code\s*logic|logic\s*&\s*correctness|correctness|implementation/.test(
-      critLower
-    );
+    const isExpectedOutputCriterion = /expected\s*output/.test(critLower);
+    const isAlgoCriterion = !isExpectedOutputCriterion && /algorithm|approach/.test(critLower);
+    const isCodeLogicCriterion =
+      !isExpectedOutputCriterion &&
+      /code\s*logic|logic.*correctness|correctness|syntax|implementation/.test(critLower);
 
     let awardedMarks = 0;
     let status = "not_satisfied";
     let evidence = "Not addressed in answer";
     let feedback = `Missing ${crit.criterion} in submitted answer.`;
 
-    if (isAlgoCriterion) {
+    if (isExpectedOutputCriterion) {
+      if (hasExpectedOutput && logicalErrors.length === 0 && isRelevantToProblem) {
+        awardedMarks = crit.maximumMarks;
+        status = "fully_satisfied";
+        evidence = (expectedOutputMatch?.[1] || lines[expectedOutputHeaderIdx + 1] || "Expected output provided").slice(0, 160);
+        feedback = "Expected output is present and consistent with the algorithm and code logic.";
+        correctConcepts.push(`Expected Output: ${evidence.slice(0, 100)}`);
+      } else if (hasExpectedOutput) {
+        awardedMarks = round1(crit.maximumMarks * 0.4);
+        status = "partially_satisfied";
+        evidence = (expectedOutputMatch?.[1] || "Expected output provided").slice(0, 160);
+        feedback = "Expected output is present, but underlying algorithm/code logic issues affect verification.";
+      } else {
+        awardedMarks = 0;
+        status = "not_satisfied";
+        feedback = "Expected output is missing or incomplete.";
+      }
+    } else if (isAlgoCriterion) {
       if (!isRelevantToProblem && algorithmStepLines.length > 0) {
         awardedMarks = round1(crit.maximumMarks * 0.25);
         status = "partially_satisfied";
         evidence = algorithmStepLines[0].slice(0, 160);
-        feedback = "Algorithm steps are present but do not clearly solve the specific problem.";
+        feedback = "Algorithm steps are present but do not logically solve the specific problem.";
         identifiedIssues.push({
           criterion: crit.criterion,
           severity: "major",
           description: feedback,
-          hint: "Align algorithm steps with the exact problem requirements.",
+          hint: "Align algorithm logic with the exact problem requirements.",
         });
       } else if (
-        (algorithmStepLines.length >= 2 || (algorithmStepLines.length >= 1 && codeLines.length >= 2)) &&
+        isRelevantToProblem &&
         logicalErrors.length === 0 &&
-        hasExpectedOutput
+        (algorithmStepLines.length >= 1 || (codeLines.length >= 3 && hasControlFlowOrOps))
       ) {
         awardedMarks = crit.maximumMarks;
         status = "fully_satisfied";
-        evidence = algorithmStepLines.slice(0, 3).join(" | ").slice(0, 160);
-        feedback = "Algorithmic steps and problem-solving approach are present, relevant, and consistent with expected output.";
-        correctConcepts.push(`${crit.criterion}: ${algorithmStepLines[0].slice(0, 100)}`);
-      } else if (algorithmStepLines.length >= 2 || (algorithmStepLines.length >= 1 && codeLines.length >= 2)) {
-        const penaltyFactor = logicalErrors.length > 0 ? 0.6 : 0.85;
-        awardedMarks = round1(crit.maximumMarks * penaltyFactor);
-        status = "partially_satisfied";
-        evidence = algorithmStepLines.slice(0, 3).join(" | ").slice(0, 160);
-        feedback =
-          logicalErrors.length > 0
-            ? `Algorithmic steps present, but logical/completeness issues detected (${logicalErrors[0]}).`
-            : "Algorithmic steps are present, but Expected Output is missing for full verification.";
-        correctConcepts.push(`${crit.criterion}: ${algorithmStepLines[0].slice(0, 100)}`);
-      } else if (algorithmStepLines.length === 1 || (codeLines.length >= 3 && hasControlFlowOrOps)) {
-        awardedMarks = round1(crit.maximumMarks * 0.6);
-        status = "partially_satisfied";
-        evidence = (algorithmStepLines[0] || codeLines[0] || "").slice(0, 160);
-        feedback = `Partial algorithmic approach demonstrated${
-          algorithmStepLines.length === 0 ? " via code flow" : ""
-        }; add complete sequential steps and edge-case handling.`;
+        evidence = (algorithmStepLines.slice(0, 3).join(" | ") || codeLines[0] || "").slice(0, 160);
+        feedback = "Algorithmic logic is correct and addresses the problem requirements.";
         correctConcepts.push(`${crit.criterion}: ${evidence.slice(0, 100)}`);
-        missingConcepts.push("Complete step-by-step algorithm");
+      } else if (algorithmStepLines.length >= 1) {
+        awardedMarks = round1(crit.maximumMarks * 0.5);
+        status = "partially_satisfied";
+        evidence = algorithmStepLines.slice(0, 3).join(" | ").slice(0, 160);
+        feedback = `Algorithmic steps present, but logical issues detected (${logicalErrors[0] || "incomplete logic"}).`;
+        correctConcepts.push(`${crit.criterion}: ${algorithmStepLines[0].slice(0, 100)}`);
       } else {
         missingConcepts.push(crit.criterion);
-        improvementSuggestions.push(`Include clear algorithm steps for ${crit.criterion}.`);
+        improvementSuggestions.push(`Include clear algorithm logic for ${crit.criterion}.`);
         identifiedIssues.push({
           criterion: crit.criterion,
           severity: "moderate",
-          description: `Algorithm steps not found for ${crit.criterion}.`,
-          hint: `Provide step-by-step algorithm logic for the problem.`,
+          description: `Algorithm logic not found for ${crit.criterion}.`,
+          hint: `Provide logically correct algorithm steps for the problem.`,
         });
       }
     } else if (isCodeLogicCriterion) {
@@ -856,28 +869,25 @@ export const generateConceptualFallback = ({
         codeLines.length >= 3 &&
         hasControlFlowOrOps &&
         syntaxErrors.length === 0 &&
-        logicalErrors.length === 0 &&
-        hasExpectedOutput
+        logicalErrors.length === 0
       ) {
         awardedMarks = crit.maximumMarks;
         status = "fully_satisfied";
         evidence = codeLines.slice(0, 3).join(" | ").slice(0, 160);
-        feedback = "Source code logic, control flow, syntax, and expected output are verified.";
+        feedback = "Source code logic, control flow, and syntax are correct.";
         correctConcepts.push(`${crit.criterion}: ${codeLines[0].slice(0, 100)}`);
       } else if (codeLines.length >= 3 && hasControlFlowOrOps) {
         let factor = 1.0;
-        if (logicalErrors.length > 0) factor -= 0.35;
+        if (logicalErrors.length > 0) factor -= 0.4;
         if (syntaxErrors.length >= 2) factor -= 0.35;
         else if (syntaxErrors.length === 1) factor -= 0.2;
-        if (!hasExpectedOutput) factor -= 0.15;
-        factor = Math.max(0.25, Math.min(0.9, factor));
+        factor = Math.max(0.25, Math.min(0.85, factor));
         awardedMarks = round1(crit.maximumMarks * factor);
         status = "partially_satisfied";
         evidence = codeLines.slice(0, 3).join(" | ").slice(0, 160);
         const notes = [];
         if (syntaxErrors.length > 0) notes.push(`Syntax issues: ${syntaxErrors.join("; ")}`);
         if (logicalErrors.length > 0) notes.push(`Logical issues: ${logicalErrors.join("; ")}`);
-        if (!hasExpectedOutput) notes.push("Expected Output missing");
         feedback = `Code logic evaluated with deductions (${notes.join(" | ")}).`;
         correctConcepts.push(`${crit.criterion}: ${codeLines[0].slice(0, 100)}`);
       } else if (codeLines.length >= 1 || hasControlFlowOrOps) {

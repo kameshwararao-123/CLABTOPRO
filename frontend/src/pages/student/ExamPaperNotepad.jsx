@@ -693,16 +693,6 @@ const ExamPaperNotepad = () => {
               ))}
             </div>
           )}
-
-          {/* Rubric Weights Info */}
-          <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-slate-400 space-y-1">
-            <div className="font-bold text-slate-300 uppercase">Faculty Rubric:</div>
-            <div>1. Algorithmic Approach – 50%</div>
-            <div>2. Code Logic &amp; Correctness – 50%</div>
-            <div className="text-slate-400 pt-0.5">
-              Students are not required to provide written explanations. Evaluation is based on the correctness of the algorithm steps, code logic, and expected output. Correctness of the algorithm and code is sufficient for full marks.
-            </div>
-          </div>
         </div>
 
         {/* Right Side: Notepad / Waiting State / Unlocked State */}

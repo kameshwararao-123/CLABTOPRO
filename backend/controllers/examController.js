@@ -410,19 +410,27 @@ const normalizeEvaluationRubric = (rawRubric) => {
     const list = [];
     const algo = rawRubric.algorithmicApproachWeight ?? rawRubric.algorithmicApproach ?? rawRubric.algorithm;
     const logic = rawRubric.codeLogicCorrectnessWeight ?? rawRubric.codeLogicCorrectness ?? rawRubric.logicCorrectnessWeight ?? rawRubric.logicCorrectness ?? rawRubric.logic;
+    const expectedOut = rawRubric.expectedOutputWeight ?? rawRubric.expectedOutput;
 
     if (algo !== undefined) {
       list.push({
         criterion: "Algorithmic Approach",
-        weight: Number(algo) || 50,
-        description: "Correct problem-solving approach, logical sequence of steps, algorithm selection, conditions/iterations, and edge case handling",
+        weight: Number(algo) || 40,
+        description: "Logically correct problem-solving approach, correct operations and sequence, conditions/iterations, and edge case handling",
       });
     }
     if (logic !== undefined) {
       list.push({
-        criterion: "Code Logic & Correctness",
-        weight: Number(logic) || 50,
-        description: "Correct implementation of algorithm, conditions, loops, calculations, data handling, program flow, edge cases, and expected output consistency",
+        criterion: "Code Logic, Correctness & Syntax",
+        weight: Number(logic) || 55,
+        description: "Correct code implementation of the algorithm, conditions, loops, calculations, program flow, edge cases, and syntax/compilation correctness",
+      });
+    }
+    if (expectedOut !== undefined) {
+      list.push({
+        criterion: "Expected Output",
+        weight: Number(expectedOut) || 5,
+        description: "Presence and correctness of expected output for the given input, matching the intended algorithm and code logic",
       });
     }
 

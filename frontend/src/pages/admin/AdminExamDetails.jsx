@@ -118,8 +118,9 @@ const AdminExamDetails = () => {
     sampleTestCases: [{ input: "", expectedOutput: "", explanation: "" }],
     hiddenTestCases: [{ input: "", expectedOutput: "" }],
     rubric: {
-      algorithmicApproach: 50,
-      codeLogicCorrectness: 50,
+      algorithmicApproach: 40,
+      codeLogicCorrectness: 55,
+      expectedOutput: 5,
     },
   });
 
@@ -477,7 +478,8 @@ const AdminExamDetails = () => {
 
     const sumWeights =
       Number(newQuestion.rubric.algorithmicApproach) +
-      Number(newQuestion.rubric.codeLogicCorrectness);
+      Number(newQuestion.rubric.codeLogicCorrectness) +
+      Number(newQuestion.rubric.expectedOutput);
 
     if (sumWeights !== 100) {
       setErrorMsg(`Evaluation rubric weights must sum to 100% (currently ${sumWeights}%).`);
@@ -518,12 +520,17 @@ const AdminExamDetails = () => {
           {
             criterion: "Algorithmic Approach",
             weight: Number(newQuestion.rubric.algorithmicApproach),
-            description: "Correct problem-solving approach, logical sequence of steps, algorithm selection, conditions/iterations, and edge case handling",
+            description: "Logically correct problem-solving approach, correct operations and sequence, conditions/iterations, and edge case handling",
           },
           {
-            criterion: "Code Logic & Correctness",
+            criterion: "Code Logic, Correctness & Syntax",
             weight: Number(newQuestion.rubric.codeLogicCorrectness),
-            description: "Correct implementation of algorithm, conditions, loops, calculations, data handling, program flow, edge cases, and expected output consistency",
+            description: "Correct code implementation of the algorithm, conditions, loops, calculations, program flow, edge cases, and syntax/compilation correctness",
+          },
+          {
+            criterion: "Expected Output",
+            weight: Number(newQuestion.rubric.expectedOutput),
+            description: "Presence and correctness of expected output for the given input, matching the intended algorithm and code logic",
           },
         ],
       };
@@ -1055,7 +1062,7 @@ const AdminExamDetails = () => {
                                 .map((r) => `${r.criterion} (${r.weight}%)`)
                                 .slice(0, 3)
                                 .join(", ")
-                            : "Standard 5-Criteria Rubric"}
+                            : "Algorithmic Approach (40%), Code Logic, Correctness & Syntax (55%), Expected Output (5%)"}
                         </span>
                       </div>
                     </div>
@@ -2374,9 +2381,9 @@ const AdminExamDetails = () => {
               {/* Rubric Criteria Weights */}
               <div className="p-4 bg-indigo-50/40 border border-indigo-200 rounded-2xl space-y-2">
                 <span className="text-xs font-bold text-indigo-900 uppercase tracking-wider block">
-                  AI Evaluation Rubric Weights (Must Sum to 100%)
+                  Faculty Rubric Weights (Must Sum to 100%)
                 </span>
-                <div className="grid grid-cols-2 gap-3 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                   <div>
                     <label className="text-slate-600 block mb-1">Algorithmic Approach (%)</label>
                     <input
@@ -2392,7 +2399,7 @@ const AdminExamDetails = () => {
                     />
                   </div>
                   <div>
-                    <label className="text-slate-600 block mb-1">Code Logic &amp; Correctness (%)</label>
+                    <label className="text-slate-600 block mb-1">Code Logic, Correctness &amp; Syntax (%)</label>
                     <input
                       type="number"
                       value={newQuestion.rubric.codeLogicCorrectness}
@@ -2405,9 +2412,23 @@ const AdminExamDetails = () => {
                       className="w-full bg-white border border-indigo-200 rounded-xl p-1.5 text-center font-bold"
                     />
                   </div>
+                  <div>
+                    <label className="text-slate-600 block mb-1">Expected Output (%)</label>
+                    <input
+                      type="number"
+                      value={newQuestion.rubric.expectedOutput}
+                      onChange={(e) =>
+                        setNewQuestion({
+                          ...newQuestion,
+                          rubric: { ...newQuestion.rubric, expectedOutput: e.target.value },
+                        })
+                      }
+                      className="w-full bg-white border border-indigo-200 rounded-xl p-1.5 text-center font-bold"
+                    />
+                  </div>
                 </div>
                 <p className="text-[11px] text-slate-500">
-                  Edge cases are evaluated within these two categories, and expected output is used for consistency verification.
+                  Evaluates actual algorithmic logic (40%), code logic, correctness &amp; syntax (55%), and expected output (5%).
                 </p>
               </div>
 

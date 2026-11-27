@@ -167,7 +167,7 @@ const ExamInstructions = () => {
                 3
               </span>
               <p>
-                <strong>50% Error Threshold Compiler Gate:</strong> The AI system evaluates your conceptual answer against the faculty rubric. The C Code Compiler will remain <span className="text-rose-400 font-bold">LOCKED</span> until your conceptual error score is strictly below 50%. You can revise and resubmit your conceptual answer whenever returned by faculty.
+                <strong>50% Error Threshold Compiler Gate:</strong> The AI system evaluates your conceptual answer for algorithmic and code correctness. The C Code Compiler will remain <span className="text-rose-400 font-bold">LOCKED</span> until your conceptual error score is strictly below 50%. You can revise and resubmit your conceptual answer whenever returned by faculty.
               </p>
             </div>
 
