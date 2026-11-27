@@ -1450,14 +1450,9 @@ const AdminExamDetails = () => {
               className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 bg-slate-50/60 text-slate-700 focus:bg-white focus:border-indigo-500 focus:outline-hidden"
             >
               <option value="all">All Exam Statuses</option>
-              <option value="Successfully Completed">Successfully Completed</option>
-              <option value="Coding In Progress">Coding In Progress</option>
-              <option value="Waiting for Faculty Evaluation">Waiting for Faculty Evaluation</option>
-              <option value="Waiting for Faculty Decision">Waiting for Faculty Decision</option>
-              <option value="Notepad Pending">Notepad Pending</option>
-              <option value="Test Cases Failed">Test Cases Failed</option>
-              <option value="Time Expired">Time Expired</option>
               <option value="Not Started">Not Started</option>
+              <option value="In Progress">In Progress</option>
+              <option value="Completed">Completed</option>
             </select>
           </div>
 
@@ -1476,11 +1471,15 @@ const AdminExamDetails = () => {
                       <th className="px-5 py-3.5">Student Name</th>
                       <th className="px-5 py-3.5 text-center">Total Questions</th>
                       <th className="px-5 py-3.5 text-center">Correct Answers</th>
+                      <th className="px-5 py-3.5 text-center">Exam Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-700">
                     {(monitoringData.students || [])
                       .filter((s) => {
+                        if (monitoringStatusFilter !== "all" && s.examStatus !== monitoringStatusFilter) {
+                          return false;
+                        }
                         if (!monitoringSearch.trim()) return true;
                         const q = monitoringSearch.trim().toLowerCase();
                         return (
@@ -1497,6 +1496,7 @@ const AdminExamDetails = () => {
                         const totalQ = row.vivaTotalQuestions ?? row.totalAssignedQuestions ?? 0;
                         const correctQ = row.vivaCorrectCount ?? row.vivaCorrect ?? 0;
                         const scoreLabel = row.vivaScoreLabel || `${correctQ}/${totalQ}`;
+                        const statusLabel = row.examStatus || "Not Started";
                         return (
                           <tr key={row.studentId} className="transition hover:bg-slate-50/60">
                             <td className="px-5 py-3.5 font-semibold text-slate-900 font-mono text-xs">
@@ -1522,12 +1522,25 @@ const AdminExamDetails = () => {
                                 {scoreLabel}
                               </span>
                             </td>
+                            <td className="px-5 py-3.5 text-center">
+                              <span
+                                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border shadow-2xs ${
+                                  statusLabel === "Completed"
+                                    ? "bg-emerald-100/80 text-emerald-800 border-emerald-300"
+                                    : statusLabel === "In Progress"
+                                    ? "bg-indigo-100/80 text-indigo-800 border-indigo-300"
+                                    : "bg-slate-100 text-slate-600 border-slate-200"
+                                }`}
+                              >
+                                {statusLabel}
+                              </span>
+                            </td>
                           </tr>
                         );
                       })}
                     {(monitoringData.students || []).length === 0 && (
                       <tr>
-                        <td colSpan={4} className="px-5 py-8 text-center text-xs text-slate-400">
+                        <td colSpan={5} className="px-5 py-8 text-center text-xs text-slate-400">
                           No students enrolled in this Viva examination yet.
                         </td>
                       </tr>
@@ -1549,7 +1562,7 @@ const AdminExamDetails = () => {
                       <th className="px-5 py-3.5 text-center">AI Evaluation</th>
                       <th className="px-5 py-3.5 text-center">Evaluation Action</th>
                       <th className="px-5 py-3.5 text-center">Compiler</th>
-                      <th className="px-5 py-3.5 text-center">Solved Questions</th>
+                      <th className="px-5 py-3.5 text-center">Solution Status</th>
                       <th className="px-5 py-3.5 text-center">Exam Status</th>
                     </tr>
                   </thead>
@@ -1739,27 +1752,21 @@ const AdminExamDetails = () => {
                             )}
                           </td>
 
-                          {/* 8. Solved Questions */}
+                          {/* 8. Solution Status */}
                           <td className="px-5 py-3.5 text-center">
                             {(() => {
-                              const solved = row.solvedQuestionsCount ?? 0;
-                              const total = row.totalAssignedQuestions || 1;
-                              const isAllSolved = total > 0 && solved >= total;
-                              const isExamEnded =
-                                exam?.status === "completed" ||
-                                monitoringData?.status === "completed";
-                              const label = row.solvedQuestionsLabel || `${solved}/${total}`;
+                              const statusText =
+                                row.solutionStatus || (row.isQuestionSolved ? "Solved" : "Not Solved");
+                              const isSolved = statusText === "Solved";
                               return (
                                 <span
-                                  className={`inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-mono font-bold border ${
-                                    isAllSolved
+                                  className={`inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-bold border ${
+                                    isSolved
                                       ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                      : solved > 0
-                                      ? "bg-indigo-50 text-indigo-700 border-indigo-200"
                                       : "bg-slate-100 text-slate-600 border-slate-200"
                                   }`}
                                 >
-                                  {isExamEnded ? `${label} Questions Completed` : label}
+                                  {statusText}
                                 </span>
                               );
                             })()}
@@ -1769,20 +1776,10 @@ const AdminExamDetails = () => {
                           <td className="px-5 py-3.5 text-center">
                             <span
                               className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border shadow-2xs ${
-                                row.examStatus === "Successfully Completed"
+                                row.examStatus === "Completed"
                                   ? "bg-emerald-100/80 text-emerald-800 border-emerald-300"
-                                  : row.examStatus === "Time Expired"
-                                  ? "bg-slate-200 text-slate-800 border-slate-300"
-                                  : row.examStatus === "Coding In Progress"
+                                  : row.examStatus === "In Progress"
                                   ? "bg-indigo-100/80 text-indigo-800 border-indigo-300"
-                                  : row.examStatus === "Test Cases Failed" || row.examStatus === "Conceptual Evaluation Failed"
-                                  ? "bg-rose-100/80 text-rose-800 border-rose-300"
-                                  : row.examStatus === "Waiting for Faculty Evaluation" || row.examStatus === "AI Evaluation in Progress"
-                                  ? "bg-amber-100/80 text-amber-800 border-amber-300"
-                                  : row.examStatus === "Waiting for Faculty Decision"
-                                  ? "bg-purple-100/80 text-purple-800 border-purple-300"
-                                  : row.examStatus === "Correction Required"
-                                  ? "bg-rose-100/80 text-rose-800 border-rose-300"
                                   : "bg-slate-100 text-slate-600 border-slate-200"
                               }`}
                             >

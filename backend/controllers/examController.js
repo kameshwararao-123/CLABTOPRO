@@ -1558,6 +1558,48 @@ export const getExamMonitoring = async (req, res, next) => {
       }
       const solvedQuestionsLabel = `${studentSolvedQuestions}/${studentTotalAssigned}`;
 
+      // Compute one overall Exam Status per student: Not Started -> In Progress -> Completed
+      const vivaAnswersObjForStudent = prog?.vivaAnswers
+        ? (prog.vivaAnswers instanceof Map ? Object.fromEntries(prog.vivaAnswers) : prog.vivaAnswers)
+        : {};
+      const liveAttemptedForStudent = Object.values(vivaAnswersObjForStudent).filter(
+        (a) => a && a.selectedOption && String(a.selectedOption).trim() !== ""
+      ).length;
+
+      let hasAnyQuestionActivity = false;
+      if (prog?.questionProgress) {
+        const qpValues = prog.questionProgress instanceof Map
+          ? [...prog.questionProgress.values()]
+          : Object.values(prog.questionProgress);
+        hasAnyQuestionActivity = qpValues.some(
+          (qp) =>
+            qp &&
+            ((qp.status && qp.status !== "not_started") ||
+              (qp.lastConceptualAnswer && qp.lastConceptualAnswer.trim().length > 0) ||
+              (qp.lastCode && qp.lastCode.trim().length > 0) ||
+              Boolean(qp.isCompleted))
+        );
+      }
+
+      const isExamOfficiallyCompleted =
+        prog?.status === "completed" || prog?.status === "successfully_completed";
+      const hasStudentStartedExam = Boolean(
+        prog?.instructionsAcknowledged ||
+          prog?.vivaStartedAt ||
+          (prog?.status && prog.status !== "not_started") ||
+          latestAnswerMap.has(sId) ||
+          latestCodeMap.has(sId) ||
+          liveAttemptedForStudent > 0 ||
+          hasAnyQuestionActivity
+      );
+
+      let overallStudentExamStatus = "Not Started";
+      if (isExamOfficiallyCompleted) {
+        overallStudentExamStatus = "Completed";
+      } else if (hasStudentStartedExam) {
+        overallStudentExamStatus = "In Progress";
+      }
+
       const questionsToIterate =
         exam.examType === "viva"
           ? [null]
@@ -1732,35 +1774,15 @@ export const getExamMonitoring = async (req, res, next) => {
           testCasesStatus = `${code.testCasesPassed} / ${code.totalTestCases} Passed`;
         }
 
-        let studentExamStatus = "Not Started";
-        if (isSuccessfullyCompleted) {
-          studentExamStatus = "Successfully Completed";
-        } else if (isTimeExpired) {
-          studentExamStatus = "Time Expired";
-        } else if (hasSubmittedCode && !allTestsPassed) {
-          studentExamStatus = "Test Cases Failed";
-        } else if (hasApprovedConceptual && !hasSubmittedCode) {
-          studentExamStatus = "Coding In Progress";
-        } else if (currentQStatus === "waiting_faculty_decision") {
-          studentExamStatus = "Waiting for Faculty Decision";
-        } else if (currentQStatus === "notepad_correction_required" || currentQConceptualStatus === "correction_required") {
-          studentExamStatus = "Correction Required";
-        } else if (currentQStatus === "evaluating") {
-          studentExamStatus = "AI Evaluation in Progress";
-        } else if (currentQStatus === "awaiting_faculty_evaluation" || (hasSubmittedConceptual && !ans?.aiEvaluation)) {
-          studentExamStatus = "Waiting for Faculty Evaluation";
-        } else if (hasSubmittedConceptual && !hasApprovedConceptual) {
-          studentExamStatus = "Waiting for Faculty Evaluation";
-        } else if (
-          prog?.status === "instructions_acknowledged" ||
-          prog?.status === "question_assigned" ||
-          prog?.status === "notepad_pending" ||
-          prog?.status === "answer_in_progress"
-        ) {
-          studentExamStatus = "Notepad Pending";
-        } else {
-          studentExamStatus = "Not Started";
-        }
+        const isQuestionSolved = Boolean(
+          qProg?.isCompleted ||
+            qProg?.status === "completed" ||
+            qProg?.status === "successfully_completed" ||
+            allTestsPassed ||
+            (assignedQId == null && isExamOfficiallyCompleted)
+        );
+        const solutionStatus = isQuestionSolved ? "Solved" : "Not Solved";
+        const studentExamStatus = overallStudentExamStatus;
 
         const lastActivityTime =
           qProg?.lastCodeSavedAt ||
@@ -1790,6 +1812,8 @@ export const getExamMonitoring = async (req, res, next) => {
           totalAssignedQuestions: studentTotalAssigned,
           solvedQuestionsCount: studentSolvedQuestions,
           solvedQuestionsLabel,
+          isQuestionSolved,
+          solutionStatus,
           difficulty: currentTargetQ?.difficulty || alloc.questionId?.difficulty || "Medium",
           status: currentQStatus || "not_started",
           instructionsAcknowledged: Boolean(prog?.instructionsAcknowledged),
@@ -1870,15 +1894,15 @@ export const getExamMonitoring = async (req, res, next) => {
     } else {
       codingSummary = {
         totalEnrolled: rows.length,
-        successfullyCompleted: rows.filter((r) => r.examStatus === "Successfully Completed").length,
-        codingInProgress: rows.filter((r) => r.examStatus === "Coding In Progress").length,
+        successfullyCompleted: rows.filter((r) => r.examStatus === "Completed").length,
+        codingInProgress: rows.filter(
+          (r) => r.examStatus === "In Progress" && r.codingStatus === "In Progress"
+        ).length,
         notepadPending: rows.filter(
-          (r) => r.examStatus === "Notepad Pending" || r.notepadStatus === "Pending"
+          (r) => r.examStatus === "In Progress" && r.notepadStatus === "Pending"
         ).length,
-        failed: rows.filter(
-          (r) => r.examStatus === "Test Cases Failed" || r.examStatus === "Conceptual Evaluation Failed"
-        ).length,
-        timeExpired: rows.filter((r) => r.examStatus === "Time Expired").length,
+        failed: rows.filter((r) => r.codingStatus === "Submitted" && r.testCasesStatus && !r.isQuestionSolved).length,
+        timeExpired: rows.filter((r) => r.status === "time_expired").length,
         notStarted: rows.filter((r) => r.examStatus === "Not Started").length,
       };
     }

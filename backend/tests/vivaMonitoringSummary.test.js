@@ -110,14 +110,121 @@ test("Viva Faculty Monitoring: returns 1 row per student with aggregated Correct
     assert.equal(row1.vivaTotalQuestions, 10);
     assert.equal(row1.vivaCorrectCount, 5);
     assert.equal(row1.vivaScoreLabel, "5/10");
+    assert.equal(row1.examStatus, "In Progress");
 
     assert.equal(row2.vivaTotalQuestions, 10);
     assert.equal(row2.vivaCorrectCount, 10);
     assert.equal(row2.vivaScoreLabel, "10/10");
+    assert.equal(row2.examStatus, "Completed");
 
     assert.equal(row3.vivaTotalQuestions, 10);
     assert.equal(row3.vivaCorrectCount, 0);
     assert.equal(row3.vivaScoreLabel, "0/10");
+    assert.equal(row3.examStatus, "In Progress");
+  } finally {
+    Exam.findById = origExamFindById;
+    ExamAllocation.find = origAllocFind;
+    StudentExamProgress.find = origProgFind;
+    ExamAnswerSubmission.find = origAnsFind;
+    ExamCodeSubmission.find = origCodeFind;
+    ExamQuestion.find = origQFind;
+  }
+});
+
+test("Internal Faculty Monitoring: displays per-question Solution Status (Solved/Not Solved) and live Exam Status (Not Started -> In Progress -> Completed)", async () => {
+  const origExamFindById = Exam.findById;
+  const origAllocFind = ExamAllocation.find;
+  const origProgFind = StudentExamProgress.find;
+  const origAnsFind = ExamAnswerSubmission.find;
+  const origCodeFind = ExamCodeSubmission.find;
+  const origQFind = ExamQuestion.find;
+
+  const examId = new mongoose.Types.ObjectId();
+  const q14 = new mongoose.Types.ObjectId();
+  const q16 = new mongoose.Types.ObjectId();
+  const assignedList = [
+    { _id: q14, title: "Count Digits", questionNumber: "Q14", difficulty: "Easy" },
+    { _id: q16, title: "Strong Number", questionNumber: "Q16", difficulty: "Medium" },
+  ];
+
+  const sStarted = new mongoose.Types.ObjectId(); // Started exam, Q14 solved, Q16 drafting in Notepad
+  const sNotStarted = new mongoose.Types.ObjectId(); // Not started yet
+  const sCompleted = new mongoose.Types.ObjectId(); // Officially completed
+
+  try {
+    Exam.findById = () => ({
+      select: () => ({
+        lean: async () => ({
+          _id: examId,
+          title: "Internal Coding Exam",
+          examType: "internal",
+          status: "in_progress",
+          questionsPerStudent: 2,
+        }),
+      }),
+    });
+
+    ExamAllocation.find = () => ({
+      populate: () => ({
+        populate: () => ({
+          populate: () => ({
+            lean: async () => [
+              { studentId: { _id: sStarted, username: "Harsha Konatala", rollNo: "S101", email: "h@college.edu" }, assignedQuestionIds: assignedList },
+              { studentId: { _id: sNotStarted, username: "Priya", rollNo: "S102", email: "p@college.edu" }, assignedQuestionIds: assignedList },
+              { studentId: { _id: sCompleted, username: "Arjun", rollNo: "S103", email: "a@college.edu" }, assignedQuestionIds: assignedList },
+            ],
+          }),
+        }),
+      }),
+    });
+
+    StudentExamProgress.find = () => ({
+      select: () => ({
+        lean: async () => [
+          {
+            studentId: sStarted,
+            status: "in_progress",
+            instructionsAcknowledged: true,
+            questionProgress: {
+              [q14.toString()]: { status: "completed", isCompleted: true },
+              [q16.toString()]: { status: "answer_in_progress", lastConceptualAnswer: "Step 1..." },
+            },
+          },
+          {
+            studentId: sCompleted,
+            status: "completed",
+            instructionsAcknowledged: true,
+            questionProgress: {
+              [q14.toString()]: { status: "completed", isCompleted: true },
+              [q16.toString()]: { status: "completed", isCompleted: true },
+            },
+          },
+        ],
+      }),
+    });
+
+    ExamQuestion.find = () => ({ select: () => ({ lean: async () => [] }) });
+    ExamAnswerSubmission.find = () => ({ sort: () => ({ select: () => ({ lean: async () => [] }) }) });
+    ExamCodeSubmission.find = () => ({ sort: () => ({ select: () => ({ lean: async () => [] }) }) });
+
+    const res = createMockRes();
+    await getExamMonitoring({ params: { examId: examId.toString() }, query: {} }, res, () => {});
+    assert.equal(res.statusCode, 200);
+
+    const harshaQ14 = res.data.students.find((r) => r.studentId === sStarted.toString() && r.targetQuestionId.toString() === q14.toString());
+    const harshaQ16 = res.data.students.find((r) => r.studentId === sStarted.toString() && r.targetQuestionId.toString() === q16.toString());
+    assert.equal(harshaQ14.solutionStatus, "Solved");
+    assert.equal(harshaQ16.solutionStatus, "Not Solved");
+    assert.equal(harshaQ14.examStatus, "In Progress");
+    assert.equal(harshaQ16.examStatus, "In Progress");
+
+    const priyaRows = res.data.students.filter((r) => r.studentId === sNotStarted.toString());
+    assert.equal(priyaRows.length, 2);
+    assert.ok(priyaRows.every((r) => r.solutionStatus === "Not Solved" && r.examStatus === "Not Started"));
+
+    const arjunRows = res.data.students.filter((r) => r.studentId === sCompleted.toString());
+    assert.equal(arjunRows.length, 2);
+    assert.ok(arjunRows.every((r) => r.solutionStatus === "Solved" && r.examStatus === "Completed"));
   } finally {
     Exam.findById = origExamFindById;
     ExamAllocation.find = origAllocFind;
