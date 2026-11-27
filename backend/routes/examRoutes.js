@@ -16,6 +16,7 @@ import {
   completeExam,
   extendExamDuration,
   getExamMonitoring,
+  getExamFinalReports,
   inspectStudentVivaExam,
   getStudentExams,
   getStudentExamInstructions,
@@ -163,6 +164,12 @@ router.get(
   authMiddleware,
   adminMiddleware,
   getStudentConceptualReport
+);
+router.get(
+  "/:examId/final-reports",
+  authMiddleware,
+  adminMiddleware,
+  getExamFinalReports
 );
 
 // =========================================================================

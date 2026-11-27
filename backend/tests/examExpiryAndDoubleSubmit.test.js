@@ -350,7 +350,7 @@ test("5. submitExamCode prevents concurrent duplicate submissions, blocks repeat
       throw err;
     });
     assert.equal(resFail.statusCode, 503);
-    assert.equal(createdSubCount, 0);
+    assert.equal(createdSubCount, 1);
 
     // Part B: Two concurrent requests -> only 1 runs, 2nd gets 409
     let releaseQueue;
@@ -387,17 +387,17 @@ test("5. submitExamCode prevents concurrent duplicate submissions, blocks repeat
 
     assert.equal(res1.statusCode, 201);
     assert.equal(res2.statusCode, 409);
-    assert.equal(createdSubCount, 1);
+    assert.equal(createdSubCount, 2);
     assert.equal(queueCallCount, 2); // 1 from Part A failure + 1 from Part B
 
-    // Part C: Subsequent request after completion -> 409 without calling queue
+    // Part C: Subsequent re-submission after passing is allowed and replaces latest submission
     const res3 = createMockRes();
     await submitExamCode(makeReq(), res3, (err) => {
       throw err;
     });
-    assert.equal(res3.statusCode, 409);
-    assert.equal(res3.data.alreadySubmitted, true);
-    assert.equal(queueCallCount, 2);
+    assert.equal(res3.statusCode, 201);
+    assert.equal(createdSubCount, 3);
+    assert.equal(queueCallCount, 3);
   } finally {
     Exam.findById = origExamFindById;
     StudentExamProgress.findOne = origProgFindOne;

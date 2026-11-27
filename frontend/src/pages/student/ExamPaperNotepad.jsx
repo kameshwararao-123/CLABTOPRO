@@ -929,6 +929,13 @@ const ExamPaperNotepad = () => {
                   <textarea
                     value={answerText}
                     onChange={handleTextChange}
+                    spellCheck={false}
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    autoComplete="off"
+                    data-gramm="false"
+                    data-gramm_editor="false"
+                    data-enable-grammarly="false"
                     onContextMenu={(e) => {
                       if (PHASE3_SECURITY_ENABLED) {
                         e.preventDefault();

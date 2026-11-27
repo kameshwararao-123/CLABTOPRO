@@ -179,6 +179,7 @@ export const createExam = async (req, res, next) => {
   }
 };
 
+
 /**
  * Get all exams for faculty with optional type filter.
  */
@@ -288,6 +289,7 @@ export const getExamById = async (req, res, next) => {
   }
 };
 
+
 /**
  * Update exam details (only allowed in draft or scheduled state).
  */
@@ -353,6 +355,7 @@ export const updateExam = async (req, res, next) => {
     next(error);
   }
 };
+
 
 /**
  * Delete draft exam.
@@ -532,6 +535,7 @@ export const addExamQuestion = async (req, res, next) => {
   }
 };
 
+
 /**
  * Update an exam question.
  */
@@ -590,6 +594,7 @@ export const updateExamQuestion = async (req, res, next) => {
     next(error);
   }
 };
+
 
 /**
  * Delete an exam question.
@@ -697,6 +702,7 @@ export const setParticipatingStudents = async (req, res, next) => {
     next(error);
   }
 };
+
 
 /**
  * Allocate questions to participating students using Fisher-Yates shuffle.
@@ -860,6 +866,7 @@ export const allocateExamQuestions = async (req, res, next) => {
     next(error);
   }
 };
+
 
 /**
  * Get allocations report for an exam.
@@ -1415,6 +1422,7 @@ export const completeExam = async (req, res, next) => {
   }
 };
 
+
 /**
  * Live Monitoring & Results overview for faculty.
  */
@@ -1519,14 +1527,12 @@ export const getExamMonitoring = async (req, res, next) => {
     }
 
     const rows = [];
-    const seenVivaStudentIds = new Set();
+    const seenStudentIdsInMonitoring = new Set();
     for (const alloc of allocations) {
       const student = alloc.studentId;
       const sId = student?._id?.toString() || "";
-      if (exam.examType === "viva") {
-        if (!sId || seenVivaStudentIds.has(sId)) continue;
-        seenVivaStudentIds.add(sId);
-      }
+      if (!sId || seenStudentIdsInMonitoring.has(sId)) continue;
+      seenStudentIdsInMonitoring.add(sId);
       const prog = progressMap.get(sId);
 
       const assigned =
@@ -1594,7 +1600,9 @@ export const getExamMonitoring = async (req, res, next) => {
       const hasStudentStartedExam = Boolean(
         prog?.instructionsAcknowledged ||
           prog?.vivaStartedAt ||
-          (prog?.status && prog.status !== "not_started") ||
+          (prog?.status &&
+            prog.status !== "not_started" &&
+            prog.status !== "question_assigned") ||
           latestAnswerMap.has(sId) ||
           latestCodeMap.has(sId) ||
           liveAttemptedForStudent > 0 ||
@@ -1874,7 +1882,7 @@ export const getExamMonitoring = async (req, res, next) => {
       let passCount = 0;
 
       for (const r of rows) {
-        if (r.status === "completed" || r.status === "successfully_completed") {
+        if (r.examStatus === "Completed") {
           completedCount++;
           if (r.vivaScore !== null && !isNaN(r.vivaScore)) {
             totalScoreSum += r.vivaScore;
@@ -1883,7 +1891,7 @@ export const getExamMonitoring = async (req, res, next) => {
           if (r.vivaPercentage !== null && r.vivaPercentage >= 40) {
             passCount++;
           }
-        } else if (r.status === "in_progress" || r.status === "instructions_acknowledged") {
+        } else if (r.examStatus === "In Progress") {
           inProgressCount++;
         } else {
           notStartedCount++;
@@ -1988,6 +1996,284 @@ export const getExamMonitoring = async (req, res, next) => {
 };
 
 /**
+ * Post-Exam Complete Reports (Notepad + Code Editor) for all students.
+ * Only returns reports after the examination has ended (faculty ended or duration expired).
+ * Returns exactly one entry per student with all assigned questions organized inside.
+ */
+export const getExamFinalReports = async (req, res, next) => {
+  try {
+    const { examId } = req.params;
+
+    const examQuery = Exam.findById(examId);
+    const exam = await (
+      typeof examQuery?.select === "function"
+        ? examQuery.select(
+            "title subject examType status startedAt completedAt durationMinutes officialEndTime participatingStudents questionsPerStudent"
+          )
+        : examQuery
+    ).lean();
+
+    if (!exam) {
+      return res.status(404).json({ message: "Exam not found." });
+    }
+
+    const examEndMs = exam.officialEndTime
+      ? new Date(exam.officialEndTime).getTime()
+      : exam.startedAt && exam.durationMinutes
+      ? new Date(exam.startedAt).getTime() + Number(exam.durationMinutes) * 60 * 1000
+      : null;
+    const isDurationExpired = Boolean(examEndMs && Date.now() >= examEndMs);
+    const hasExamEnded = exam.status === "completed" || isDurationExpired;
+
+    if (!hasExamEnded) {
+      return res.status(200).json({
+        examEnded: false,
+        examTitle: exam.title,
+        examType: exam.examType,
+        status: exam.status,
+        message: "Final reports are available only after the examination ends.",
+        reports: [],
+      });
+    }
+
+    let [allocations, progresses, answerSubs, codeSubs] = await Promise.all([
+      ExamAllocation.find({ examId })
+        .populate("studentId", "username rollNo email")
+        .populate("questionId", "title difficulty questionNumber problemStatement")
+        .populate("assignedQuestionIds", "title difficulty questionNumber problemStatement")
+        .lean(),
+      StudentExamProgress.find({ examId }).lean(),
+      ExamAnswerSubmission.find({ examId })
+        .sort({ attemptNumber: -1, submittedAt: -1 })
+        .lean(),
+      ExamCodeSubmission.find({ examId })
+        .sort({ submittedAt: -1, createdAt: -1 })
+        .lean(),
+    ]);
+
+    if (allocations.length === 0 && exam.participatingStudents?.length > 0) {
+      const partStudents = await User.find({ _id: { $in: exam.participatingStudents } })
+        .select("username rollNo email")
+        .lean();
+      allocations = partStudents.map((st) => ({
+        studentId: st,
+        questionId: null,
+        assignedQuestionIds: [],
+      }));
+    }
+
+    const progressMap = new Map(progresses.map((p) => [p.studentId.toString(), p]));
+    const latestAnswerByStudent = new Map();
+    const latestAnswerBySQ = new Map();
+    for (const a of answerSubs) {
+      const sId = a.studentId?.toString();
+      if (!sId) continue;
+      if (!latestAnswerByStudent.has(sId)) {
+        latestAnswerByStudent.set(sId, a);
+      }
+      if (a.questionId) {
+        const key = `${sId}_${a.questionId.toString()}`;
+        if (!latestAnswerBySQ.has(key)) {
+          latestAnswerBySQ.set(key, a);
+        }
+      }
+    }
+
+    const latestCodeByStudent = new Map();
+    const latestCodeBySQ = new Map();
+    for (const c of codeSubs) {
+      const sId = c.studentId?.toString();
+      if (!sId) continue;
+      if (!latestCodeByStudent.has(sId)) {
+        latestCodeByStudent.set(sId, c);
+      }
+      if (c.questionId) {
+        const key = `${sId}_${c.questionId.toString()}`;
+        if (!latestCodeBySQ.has(key)) {
+          latestCodeBySQ.set(key, c);
+        }
+      }
+    }
+
+    const seenStudentIds = new Set();
+    const reports = [];
+
+    for (const alloc of allocations) {
+      const student = alloc.studentId;
+      const sId = student?._id?.toString() || "";
+      if (!sId || seenStudentIds.has(sId)) continue;
+      seenStudentIds.add(sId);
+
+      const prog = progressMap.get(sId);
+      const rawAssigned =
+        alloc.assignedQuestionIds && alloc.assignedQuestionIds.length > 0
+          ? alloc.assignedQuestionIds
+          : alloc.questionId
+          ? [alloc.questionId]
+          : [];
+
+      const assigned = [];
+      const seenQIds = new Set();
+      for (const qItem of rawAssigned) {
+        const qIdStr = qItem?._id?.toString();
+        if (qIdStr && !seenQIds.has(qIdStr)) {
+          seenQIds.add(qIdStr);
+          assigned.push(qItem);
+        }
+      }
+
+      const isOfficialCompleted =
+        prog?.status === "completed" || prog?.status === "successfully_completed";
+      const hasStarted = Boolean(
+        prog?.instructionsAcknowledged ||
+          prog?.vivaStartedAt ||
+          (prog?.status &&
+            prog.status !== "not_started" &&
+            prog.status !== "question_assigned") ||
+          latestAnswerByStudent.has(sId) ||
+          latestCodeByStudent.has(sId)
+      );
+      const examStatus = isOfficialCompleted
+        ? "Completed"
+        : hasStarted
+        ? "In Progress"
+        : "Not Started";
+
+      const questions = assigned.map((qItem, idx) => {
+        const qIdStr = qItem._id.toString();
+        const sqKey = `${sId}_${qIdStr}`;
+        const rawQProg = prog?.questionProgress?.get
+          ? prog.questionProgress.get(qIdStr)
+          : prog?.questionProgress?.[qIdStr];
+        const qProg = rawQProg?.toObject ? rawQProg.toObject() : rawQProg;
+
+        const latestAns =
+          latestAnswerBySQ.get(sqKey) ||
+          (assigned.length === 1 ? latestAnswerByStudent.get(sId) : null);
+        const latestCode =
+          latestCodeBySQ.get(sqKey) ||
+          (assigned.length === 1 ? latestCodeByStudent.get(sId) : null);
+
+        const aiEval =
+          latestAns?.aiEvaluation ||
+          qProg?.lastAIEvaluation ||
+          (assigned.length === 1 ? prog?.lastAIEvaluation : null) ||
+          null;
+
+        const draftAnswer =
+          qProg?.lastConceptualAnswer ||
+          (assigned.length === 1 ? prog?.lastConceptualAnswer : "") ||
+          "";
+
+        const notepadAnswer = latestAns?.answerText ?? (draftAnswer.trim() ? draftAnswer : null);
+        const hasSubmittedNotepad = Boolean(latestAns);
+
+        let notepadStatus = "Pending";
+        if (
+          qProg?.status === "notepad_correction_required" ||
+          qProg?.conceptualStatus === "correction_required"
+        ) {
+          notepadStatus = "Correction Required";
+        } else if (hasSubmittedNotepad) {
+          notepadStatus = "Submitted";
+        } else if (draftAnswer.trim().length > 0) {
+          notepadStatus = "Draft Saved (Not Submitted)";
+        }
+
+        const sanitizedAiEval = aiEval
+          ? {
+              understandingPercentage:
+                aiEval.understandingPercentage ??
+                (aiEval.errorPercentage !== undefined && aiEval.errorPercentage !== null
+                  ? Math.max(0, 100 - aiEval.errorPercentage)
+                  : null),
+              errorPercentage: aiEval.errorPercentage ?? null,
+              overallFeedback: aiEval.overallFeedback || aiEval.feedbackSummary || "",
+              correctConcepts: aiEval.correctConcepts || aiEval.strengths || [],
+              missingConcepts: aiEval.missingConcepts || [],
+              incorrectConcepts:
+                aiEval.incorrectConcepts ||
+                (aiEval.identifiedIssues || []).map((i) => `${i.criterion}: ${i.description}`),
+              suggestions:
+                aiEval.improvementSuggestions ||
+                aiEval.suggestions ||
+                (aiEval.identifiedIssues || []).map((i) => i.hint).filter(Boolean),
+            }
+          : null;
+
+        const draftCode =
+          !latestCode && (qProg?.currentCode || (assigned.length === 1 ? prog?.currentCode : ""))
+            ? qProg?.currentCode || prog?.currentCode
+            : null;
+
+        return {
+          questionId: qIdStr,
+          questionNumber: qItem.questionNumber || `Q${idx + 1}`,
+          title: qItem.title || `Question ${idx + 1}`,
+          difficulty: qItem.difficulty || "Medium",
+          problemStatement: qItem.problemStatement || "",
+          notepadReport: {
+            notepadStatus,
+            hasSubmitted: hasSubmittedNotepad,
+            answerText: notepadAnswer,
+            attemptNumber: latestAns?.attemptNumber || qProg?.conceptualAttemptsCount || 0,
+            submittedAt: latestAns?.submittedAt || qProg?.submittedAt || null,
+            facultyDecision:
+              latestAns?.facultyDecision || qProg?.facultyDecision || "pending",
+            aiEvaluation: sanitizedAiEval,
+          },
+          codeReport: {
+            hasSubmission: Boolean(latestCode || draftCode),
+            code: latestCode?.code ?? draftCode ?? null,
+            isDraftOnly: Boolean(!latestCode && draftCode),
+            language: latestCode?.language || "c",
+            status: latestCode?.status || (draftCode ? "draft" : null),
+            testCasesPassed: latestCode?.testCasesPassed ?? 0,
+            totalTestCases: latestCode?.totalTestCases ?? 0,
+            allPassed: Boolean(latestCode?.allPassed),
+            testCaseResults: Array.isArray(latestCode?.testCaseResults)
+              ? latestCode.testCaseResults.map((tc, tIdx) => ({
+                  testCaseNumber: tc.testCaseNumber ?? tIdx + 1,
+                  status: tc.status,
+                  isHidden: Boolean(tc.isHidden),
+                  executionTime: tc.executionTime || 0,
+                  error: tc.error || "",
+                }))
+              : [],
+            compilerOutput: latestCode?.compilerOutput || "",
+            submittedAt: latestCode?.submittedAt || latestCode?.createdAt || null,
+          },
+        };
+      });
+
+      reports.push({
+        studentId: sId,
+        username: student?.username || "Unknown",
+        rollNo: student?.rollNo || "—",
+        email: student?.email || "",
+        examStatus,
+        completedAt: prog?.completedAt || exam.completedAt || null,
+        questions,
+      });
+    }
+
+    reports.sort((a, b) => (a.rollNo || "").localeCompare(b.rollNo || ""));
+
+    res.status(200).json({
+      examEnded: true,
+      examTitle: exam.title,
+      examType: exam.examType,
+      status: exam.status,
+      completedAt: exam.completedAt || null,
+      reports,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+
+/**
  * Inspect detailed student Viva MCQ submission with question choices & answer keys.
  * GET /api/v1/exams/:examId/students/:studentId/viva-inspect
  */
@@ -2082,6 +2368,7 @@ export const inspectStudentVivaExam = async (req, res, next) => {
   }
 };
 
+
 // =========================================================================
 // STUDENT EXAM ACTIONS
 // =========================================================================
@@ -2147,7 +2434,12 @@ export const getStudentExams = async (req, res, next) => {
         } else if (isTimeExpired) {
           effectiveStatus = "time_expired";
           displayProgress = "Time Expired";
-        } else if (prog?.status === "in_progress" || prog?.status === "instructions_acknowledged") {
+        } else if (
+          prog?.status === "in_progress" ||
+          prog?.status === "instructions_acknowledged" ||
+          prog?.instructionsAcknowledged ||
+          prog?.vivaStartedAt
+        ) {
           displayProgress = "In Progress";
         }
       } else {
@@ -2173,7 +2465,9 @@ export const getStudentExams = async (req, res, next) => {
         const hasStarted = Boolean(
           prog &&
           (prog.instructionsAcknowledged ||
-            (prog.status && prog.status !== "not_started"))
+            (prog.status &&
+              prog.status !== "not_started" &&
+              prog.status !== "question_assigned"))
         );
 
         if (isExamCompleted) {
@@ -2293,6 +2587,7 @@ export const getStudentExamInstructions = async (req, res, next) => {
   }
 };
 
+
 /**
  * Acknowledge exam instructions.
  */
@@ -2332,6 +2627,7 @@ export const acknowledgeInstructions = async (req, res, next) => {
     next(error);
   }
 };
+
 
 /**
  * Get student's assigned question (STRICT: Never leaks hidden test cases or other students' assignments).
@@ -2381,7 +2677,11 @@ export const getMyAssignedQuestion = async (req, res, next) => {
       });
     }
 
-    if (progress.status === "instructions_acknowledged" || progress.status === "question_assigned") {
+    if (
+      progress.status === "not_started" ||
+      progress.status === "instructions_acknowledged" ||
+      progress.status === "question_assigned"
+    ) {
       progress.status = "notepad_pending";
       await progress.save();
     }
@@ -2538,7 +2838,12 @@ export const getMyAssignedQuestion = async (req, res, next) => {
         lastCodeSavedAt: qLastCodeSavedAt,
         isCompleted: isQCompleted,
       },
-      previousAttempts,
+      previousAttempts: (previousAttempts || []).map((att) => {
+        if (!att?.aiEvaluation) return att;
+        const { criteriaEvaluation: _ce, rubricSnapshot: _rs, rubricWarnings: _rw, ...safeEval } =
+          att.aiEvaluation;
+        return { ...att, aiEvaluation: safeEval };
+      }),
       question: {
         _id: q._id,
         questionNumber: q.questionNumber || `Q${activeIndex + 1}`,
@@ -2550,7 +2855,6 @@ export const getMyAssignedQuestion = async (req, res, next) => {
         explanation: q.explanation,
         difficulty: q.difficulty,
         marks: q.marks,
-        evaluationRubric: q.evaluationRubric,
         sampleTestCases: visibleSamples,
       },
       questions: questionList,
@@ -2561,6 +2865,7 @@ export const getMyAssignedQuestion = async (req, res, next) => {
     next(error);
   }
 };
+
 
 /**
  * Autosave student's code draft in C code editor.
@@ -2876,6 +3181,7 @@ export const autosaveCodeDraft = async (req, res, next) => {
   }
 };
 
+
 /**
  * Log exam security events (e.g., tab switches, window blur, fullscreen exit)
  */
@@ -3073,6 +3379,7 @@ export const endStudentExam = async (req, res, next) => {
     next(error);
   }
 };
+
 
 /**
  * Condition 3: Automatic Exam Time-Expiry Workflow.
@@ -3332,6 +3639,7 @@ export const expireStudentExam = async (req, res, next) => {
   }
 };
 
+
 /**
  * Autosave student's conceptual answer draft in Notepad.
  * Supports optional questionId for multi-question assignments.
@@ -3583,6 +3891,7 @@ export const autosaveAnswerDraft = async (req, res, next) => {
   }
 };
 
+
 /**
  * Student Notepad Conceptual Answer Submission.
  * Saves the answer, updates status to awaiting_faculty_evaluation, and does NOT auto-evaluate.
@@ -3762,6 +4071,7 @@ export const submitStudentPaperAnswer = async (req, res, next) => {
     next(error);
   }
 };
+
 
 // Aliased for backward compatibility with existing route endpoints
 export const evaluatePaperAnswer = submitStudentPaperAnswer;
@@ -4243,6 +4553,7 @@ export const facultyAuthorizeCompiler = async (req, res, next) => {
   }
 };
 
+
 /**
  * Faculty Action: Return to Notepad (Condition B: errorPercentage >= 50)
  * Returns student to Notepad with feedback and requires correction.
@@ -4347,6 +4658,7 @@ export const facultyReturnToNotepad = async (req, res, next) => {
   }
 };
 
+
 /**
  * Fetch Student's Conceptual Evaluation Report and Revision History (for Faculty Inspection Modal).
  */
@@ -4354,6 +4666,10 @@ export const getStudentConceptualReport = async (req, res, next) => {
   try {
     const { examId, studentId } = req.params;
     const { questionId } = req.query;
+    const normalizedQuestionId =
+      questionId && questionId !== "undefined" && questionId !== "null"
+        ? String(questionId).trim()
+        : null;
 
     const student = await User.findById(studentId).select("username rollNo email");
     if (!student) {
@@ -4361,7 +4677,7 @@ export const getStudentConceptualReport = async (req, res, next) => {
     }
 
     const query = { examId, studentId };
-    if (questionId) query.questionId = questionId;
+    if (normalizedQuestionId) query.questionId = normalizedQuestionId;
 
     const allAttempts = await ExamAnswerSubmission.find(query)
       .populate("questionId", "title difficulty problemStatement evaluationRubric questionNumber marks")
@@ -4371,7 +4687,72 @@ export const getStudentConceptualReport = async (req, res, next) => {
     const latest = allAttempts[0] || null;
     const progress = await StudentExamProgress.findOne({ examId, studentId }).lean();
 
-    const targetQ = latest?.questionId || (questionId ? await ExamQuestion.findById(questionId).select("title difficulty problemStatement evaluationRubric questionNumber marks").lean() : null);
+    let latestCodeSub = null;
+    if (
+      mongoose.connection?.readyState === 1 ||
+      ExamCodeSubmission.findOne !== mongoose.Model.findOne
+    ) {
+      const codeQuery = { examId, studentId };
+      if (normalizedQuestionId) codeQuery.questionId = normalizedQuestionId;
+      latestCodeSub = await ExamCodeSubmission.findOne(codeQuery)
+        .sort({ submittedAt: -1, createdAt: -1 })
+        .select("questionId code language status testCasesPassed totalTestCases allPassed testCaseResults compilerOutput submittedAt createdAt")
+        .lean();
+
+      if (!latestCodeSub && normalizedQuestionId) {
+        let assignedCount = 1;
+        if (
+          mongoose.connection?.readyState === 1 ||
+          ExamAllocation.findOne !== mongoose.Model.findOne
+        ) {
+          const alloc = await ExamAllocation.findOne({ examId, studentId })
+            .select("questionId assignedQuestionIds")
+            .lean();
+          if (alloc) {
+            assignedCount =
+              alloc.assignedQuestionIds?.length > 0
+                ? alloc.assignedQuestionIds.length
+                : alloc.questionId
+                ? 1
+                : 0;
+          }
+        }
+        if (assignedCount <= 1) {
+          latestCodeSub = await ExamCodeSubmission.findOne({ examId, studentId })
+            .sort({ submittedAt: -1, createdAt: -1 })
+            .select("questionId code language status testCasesPassed totalTestCases allPassed testCaseResults compilerOutput submittedAt createdAt")
+            .lean();
+        }
+      }
+    }
+
+    if (!latestCodeSub && progress) {
+      const qKey = normalizedQuestionId || null;
+      const rawQProg = qKey && progress.questionProgress
+        ? (progress.questionProgress.get
+            ? progress.questionProgress.get(qKey)
+            : progress.questionProgress[qKey])
+        : null;
+      const qProg = rawQProg?.toObject ? rawQProg.toObject() : rawQProg;
+      const fallbackCode = qProg?.currentCode || (!qKey ? progress.currentCode : "") || "";
+      if (typeof fallbackCode === "string" && fallbackCode.trim().length > 0) {
+        latestCodeSub = {
+          _id: null,
+          questionId: normalizedQuestionId || null,
+          code: fallbackCode,
+          language: "c",
+          status: qProg?.isCompleted ? "accepted" : "submitted",
+          testCasesPassed: 0,
+          totalTestCases: 0,
+          allPassed: Boolean(qProg?.isCompleted),
+          testCaseResults: [],
+          compilerOutput: "",
+          submittedAt: qProg?.completedAt || qProg?.lastCodeSavedAt || progress.lastCodeSavedAt || progress.completedAt || null,
+        };
+      }
+    }
+
+    const targetQ = latest?.questionId || (normalizedQuestionId ? await ExamQuestion.findById(normalizedQuestionId).select("title difficulty problemStatement evaluationRubric questionNumber marks").lean() : null);
     const maxMarks = latest?.aiEvaluation?.maximumMarks || targetQ?.marks || 10;
     const errPct = latest?.aiEvaluation?.errorPercentage;
     const undPct = errPct !== undefined && errPct !== null ? Math.max(0, 100 - errPct) : null;
@@ -4394,6 +4775,29 @@ export const getStudentConceptualReport = async (req, res, next) => {
       totalMarks: maxMarks,
       correctnessPercentage: undPct,
       latestSubmission: latest,
+      latestCodeSubmission: latestCodeSub
+        ? {
+            _id: latestCodeSub._id,
+            questionId: latestCodeSub.questionId,
+            code: latestCodeSub.code,
+            language: latestCodeSub.language || "c",
+            status: latestCodeSub.status,
+            testCasesPassed: latestCodeSub.testCasesPassed ?? 0,
+            totalTestCases: latestCodeSub.totalTestCases ?? 0,
+            allPassed: Boolean(latestCodeSub.allPassed),
+            testCaseResults: Array.isArray(latestCodeSub.testCaseResults)
+              ? latestCodeSub.testCaseResults.map((tc, tIdx) => ({
+                  testCaseNumber: tc.testCaseNumber ?? tIdx + 1,
+                  status: tc.status,
+                  isHidden: Boolean(tc.isHidden),
+                  executionTime: tc.executionTime || 0,
+                  error: tc.error || "",
+                }))
+              : [],
+            compilerOutput: latestCodeSub.compilerOutput || "",
+            submittedAt: latestCodeSub.submittedAt || latestCodeSub.createdAt || null,
+          }
+        : null,
       allAttempts,
       progress: progress || null,
     });
@@ -4401,6 +4805,7 @@ export const getStudentConceptualReport = async (req, res, next) => {
     next(error);
   }
 };
+
 
 /**
  * Run C Code in Exam Mode (Tests against VISIBLE sample cases only).
@@ -4748,6 +5153,7 @@ export const runExamCode = async (req, res, next) => {
   }
 };
 
+
 /**
  * Final Code Submission in Exam Mode (Evaluates against ALL visible and hidden test cases).
  * Supports multi-question allocations with per-question progress and completion tracking.
@@ -4856,14 +5262,6 @@ export const submitExamCode = async (req, res, next) => {
     }
 
     const qProgObj = qProg?.toObject ? qProg.toObject() : qProg;
-    if (qProgObj?.isCompleted) {
-      return res.status(409).json({
-        success: false,
-        alreadySubmitted: true,
-        isCompleted: true,
-        message: "You have already submitted a passing solution for this question.",
-      });
-    }
 
     const codeLockKey = `${examId}:${studentId}:${qKey}`;
     if (activeCodeSubmissionLocks.has(codeLockKey) || qProgObj?.status === "submission_pending") {
@@ -4876,11 +5274,11 @@ export const submitExamCode = async (req, res, next) => {
 
     activeCodeSubmissionLocks.add(codeLockKey);
     let dbClaimedCodeLock = false;
-    let persistedCodeSubmission = false;
+    let progressSavedFinal = false;
 
     const releaseCodeSubmissionLock = async () => {
       activeCodeSubmissionLocks.delete(codeLockKey);
-      if (!persistedCodeSubmission && dbClaimedCodeLock) {
+      if (!progressSavedFinal && dbClaimedCodeLock) {
         if (
           typeof StudentExamProgress.updateOne === "function" &&
           (mongoose.connection?.readyState === 1 ||
@@ -4890,7 +5288,6 @@ export const submitExamCode = async (req, res, next) => {
             {
               examId,
               studentId,
-              [`questionProgress.${qKey}.isCompleted`]: { $ne: true },
               [`questionProgress.${qKey}.status`]: "submission_pending",
             },
             {
@@ -4912,7 +5309,6 @@ export const submitExamCode = async (req, res, next) => {
             examId,
             studentId,
             status: { $nin: ["completed", "successfully_completed", "time_expired"] },
-            [`questionProgress.${qKey}.isCompleted`]: { $ne: true },
             [`questionProgress.${qKey}.status`]: { $ne: "submission_pending" },
           },
           {
@@ -4920,6 +5316,8 @@ export const submitExamCode = async (req, res, next) => {
               [`questionProgress.${qKey}.questionId`]: question._id,
               [`questionProgress.${qKey}.compilerAllowed`]: true,
               [`questionProgress.${qKey}.status`]: "submission_pending",
+              [`questionProgress.${qKey}.currentCode`]: code,
+              currentCode: code,
             },
           },
           { new: true }
@@ -4928,16 +5326,46 @@ export const submitExamCode = async (req, res, next) => {
           return res.status(409).json({
             success: false,
             alreadySubmittedOrInProgress: true,
-            message: "Submission is already in progress or already completed for this question.",
+            message: "Submission is already in progress or exam has ended for this question.",
           });
         }
         progress = claimed;
         dbClaimedCodeLock = true;
+      } else {
+        progress.currentCode = code;
+        if (!progress.questionProgress) {
+          progress.questionProgress = new Map();
+        }
+        const rawInitialQProg = progress.questionProgress.get(qKey);
+        const initialQProg = rawInitialQProg?.toObject
+          ? rawInitialQProg.toObject()
+          : rawInitialQProg || {
+              questionId: question._id,
+              compilerAllowed: true,
+            };
+        initialQProg.currentCode = code;
+        progress.questionProgress.set(qKey, initialQProg);
       }
 
       const allTestCases = question.testCases || [];
 
-      // Execute against all test cases in deterministic sandbox via shared submission queue
+      // Step 2 & 3: Save submitted source code to the database immediately before evaluation
+      const submission = await ExamCodeSubmission.create({
+        examId,
+        studentId,
+        questionId: question._id,
+        code,
+        language: "c",
+        status: "pending",
+        testCasesPassed: 0,
+        totalTestCases: allTestCases.length,
+        testCaseResults: [],
+        allPassed: false,
+        executionTime: 0,
+        compilerOutput: "",
+      });
+
+      // Step 4: Execute against all test cases in deterministic sandbox via shared submission queue
       let judgeResult;
       try {
         judgeResult = await submissionQueue.enqueue(
@@ -4958,7 +5386,7 @@ export const submitExamCode = async (req, res, next) => {
         const handled = handleExamQueueError(
           res,
           queueErr,
-          "Submission queue is currently busy. Please retry in a few seconds."
+          "Submission saved, but evaluation queue is currently busy. Please retry in a few seconds."
         );
         if (handled) return handled;
         throw queueErr;
@@ -4985,13 +5413,8 @@ export const submitExamCode = async (req, res, next) => {
 
     const allPassed = judgeResult.status === "accepted";
 
-    // Save immutable snapshot
-    const submission = await ExamCodeSubmission.create({
-      examId,
-      studentId,
-      questionId: question._id,
-      code,
-      language: "c",
+    // Step 5: Store evaluation results independently without overwriting or deleting the saved submission
+    const evalFields = {
       status: judgeResult.status,
       testCasesPassed: judgeResult.testCasesPassed || 0,
       totalTestCases: judgeResult.totalTestCases || allTestCases.length,
@@ -4999,7 +5422,21 @@ export const submitExamCode = async (req, res, next) => {
       allPassed,
       executionTime: judgeResult.executionTime || 0,
       compilerOutput: judgeResult.compilerOutput || "",
-    });
+    };
+    if (typeof submission?.save === "function") {
+      Object.assign(submission, evalFields);
+      await submission.save();
+    } else if (submission) {
+      Object.assign(submission, evalFields);
+      if (
+        submission._id &&
+        typeof ExamCodeSubmission.findByIdAndUpdate === "function" &&
+        (mongoose.connection?.readyState === 1 ||
+          ExamCodeSubmission.findByIdAndUpdate !== mongoose.Model.findByIdAndUpdate)
+      ) {
+        await ExamCodeSubmission.findByIdAndUpdate(submission._id, { $set: evalFields }).catch(() => {});
+      }
+    }
 
     // Update question progress
     progress.currentCode = code;
@@ -5022,6 +5459,9 @@ export const submitExamCode = async (req, res, next) => {
       currentQProg.status = "completed";
       progress.questionProgress.set(qKey, currentQProg);
     } else {
+      currentQProg.isCompleted = false;
+      currentQProg.completedAt = null;
+      currentQProg.score = 0;
       currentQProg.status = "test_cases_failed";
       progress.questionProgress.set(qKey, currentQProg);
     }
@@ -5060,7 +5500,7 @@ export const submitExamCode = async (req, res, next) => {
     }
 
     await progress.save();
-    persistedCodeSubmission = true;
+    progressSavedFinal = true;
 
     const allQuestionsSubmitted = submittedQuestionCount >= assignedQuestionCount;
 
@@ -5494,6 +5934,67 @@ export const getStudentExamCompletion = async (req, res, next) => {
       ? (progress?.vivaResult?.score ?? null)
       : (computedCodingScore ?? progress?.finalScore ?? null);
 
+    let questionCodeSubmissions = [];
+    if (!isViva && isFacultyOrAdmin) {
+      const assignedList =
+        allocation?.assignedQuestionIds?.length > 0
+          ? allocation.assignedQuestionIds
+          : allocation?.questionId
+          ? [allocation.questionId]
+          : [];
+      const latestByQ = new Map();
+      if (Array.isArray(allCodeSubs)) {
+        for (const sub of allCodeSubs) {
+          const qKey = sub?.questionId ? sub.questionId.toString() : "default";
+          if (!latestByQ.has(qKey)) {
+            latestByQ.set(qKey, sub);
+          }
+        }
+      }
+      if (assignedList.length > 0) {
+        questionCodeSubmissions = assignedList.map((qItem, idx) => {
+          const qIdStr = qItem?._id ? qItem._id.toString() : "";
+          const sub = (qIdStr && latestByQ.get(qIdStr)) || (assignedList.length === 1 ? latestCodeSub : null);
+          return {
+            questionId: qIdStr || null,
+            questionNumber: qItem?.questionNumber || `Q${idx + 1}`,
+            questionTitle: qItem?.title || `Question ${idx + 1}`,
+            code: sub?.code ?? null,
+            status: sub?.status || null,
+            testCasesPassed: sub?.testCasesPassed ?? 0,
+            totalTestCases: sub?.totalTestCases ?? 0,
+            allPassed: Boolean(sub?.allPassed),
+            compilerOutput: sub?.compilerOutput || "",
+            submittedAt: sub?.submittedAt || sub?.createdAt || null,
+          };
+        });
+      } else if (latestCodeSub) {
+        questionCodeSubmissions = [
+          {
+            questionId: latestCodeSub.questionId?.toString() || null,
+            questionNumber: "Q1",
+            questionTitle: "Assigned Question",
+            code: latestCodeSub.code ?? null,
+            status: latestCodeSub.status || null,
+            testCasesPassed: latestCodeSub.testCasesPassed ?? 0,
+            totalTestCases: latestCodeSub.totalTestCases ?? 0,
+            allPassed: Boolean(latestCodeSub.allPassed),
+            testCaseResults: Array.isArray(latestCodeSub.testCaseResults)
+              ? latestCodeSub.testCaseResults.map((tc, tIdx) => ({
+                  testCaseNumber: tc.testCaseNumber ?? tIdx + 1,
+                  status: tc.status,
+                  isHidden: Boolean(tc.isHidden),
+                  executionTime: tc.executionTime || 0,
+                  error: tc.error || "",
+                }))
+              : [],
+            compilerOutput: latestCodeSub.compilerOutput || "",
+            submittedAt: latestCodeSub.submittedAt || latestCodeSub.createdAt || null,
+          },
+        ];
+      }
+    }
+
     res.status(200).json({
       isSuccessfullyCompleted,
       examStatus,
@@ -5539,12 +6040,16 @@ export const getStudentExamCompletion = async (req, res, next) => {
         totalMarks: exam.totalMarks,
       },
       progress,
+      questionCodeSubmissions,
       submission: latestCodeSub
         ? {
+            code: latestCodeSub.code,
             status: latestCodeSub.status,
             testCasesPassed,
             totalTestCases,
             testCasesFailed,
+            allPassed: Boolean(latestCodeSub.allPassed),
+            compilerOutput: latestCodeSub.compilerOutput || "",
             executionTime: latestCodeSub.executionTime,
             submittedAt: latestCodeSub.submittedAt,
           }
@@ -5554,6 +6059,7 @@ export const getStudentExamCompletion = async (req, res, next) => {
     next(error);
   }
 };
+
 
 // =========================================================================
 // VIVA MCQ EXAMINATION CONTROLLERS
@@ -5635,6 +6141,7 @@ export const getVivaExamDetailsAndInstructions = async (req, res, next) => {
   }
 };
 
+
 /**
  * Acknowledge instructions and start Viva exam.
  */
@@ -5705,6 +6212,7 @@ export const acknowledgeVivaInstructions = async (req, res, next) => {
     next(error);
   }
 };
+
 
 /**
  * Get Viva exam questions for student.
@@ -5825,6 +6333,7 @@ export const getVivaExamQuestions = async (req, res, next) => {
   }
 };
 
+
 /**
  * Autosave student's Viva MCQ answer draft.
  */
@@ -5943,6 +6452,7 @@ export const saveVivaAnswerDraft = async (req, res, next) => {
     next(error);
   }
 };
+
 
 /**
  * Submit Viva MCQ exam, perform automatic evaluation and calculate score.
@@ -6220,6 +6730,7 @@ export const getAIEvaluationQueueStatus = async (req, res, next) => {
   }
 };
 
+
 export const getVivaStudentResults = async (req, res, next) => {
   try {
     const { examId } = req.params;
@@ -6244,3 +6755,4 @@ export const getVivaStudentResults = async (req, res, next) => {
     next(error);
   }
 };
+

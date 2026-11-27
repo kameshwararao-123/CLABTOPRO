@@ -402,7 +402,7 @@ const AdminExams = () => {
 
                 <div className="mt-3 flex items-center justify-between text-[11px] text-slate-400 border-t border-slate-50 pt-2">
                   <span>Year: {exam.academicYear} • Sem: {exam.semester}</span>
-                  <span className="font-semibold text-slate-600">{exam.totalMarks} Marks</span>
+                  <span className="font-semibold text-slate-600 uppercase">{exam.examType || "internal"}</span>
                 </div>
               </div>
 

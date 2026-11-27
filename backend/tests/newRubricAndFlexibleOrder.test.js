@@ -248,3 +248,132 @@ int main() {
   });
   assert.ok(guarded.totalMarks < 100, `Guardrail must prevent 100/100 when missingConcepts is non-empty, got ${guarded.totalMarks}`);
 });
+
+test("8. Algorithm-only submission (no code, no expected output) receives 40% correctness (40/100) and 60% error, not 65%", () => {
+  const q = {
+    title: "Reverse a Number",
+    problemStatement: "Write a C program to reverse the digits of a given integer.",
+    marks: 100,
+  };
+  const algoOnly = `1. Algorithm
+- Read the integer n
+- Initialize rev = 0
+- Repeat while n > 0: extract last digit n % 10, update rev = rev * 10 + digit, divide n by 10
+- Print rev`;
+
+  const res = generateConceptualFallback({ question: q, studentAnswer: algoOnly });
+  assert.equal(res.understandingPercentage, 40);
+  assert.equal(res.errorPercentage, 60);
+  assert.equal(res.totalMarks, 40);
+  const algoCrit = res.criteriaEvaluation.find((c) => /algorithm/i.test(c.criterion));
+  const codeCrit = res.criteriaEvaluation.find((c) => /code\s*logic/i.test(c.criterion));
+  const outCrit = res.criteriaEvaluation.find((c) => /expected\s*output/i.test(c.criterion));
+  assert.equal(algoCrit.awardedMarks, 40);
+  assert.equal(codeCrit.awardedMarks, 0);
+  assert.equal(outCrit.awardedMarks, 0);
+
+  // Also verify Gemini validation guardrail caps Code Logic & Expected Output at 0 when absent
+  const norm = normalizeAndValidateRubric(q);
+  const geminiGuarded = validateAndScoreGeminiResponse({
+    normalizedRubric: norm,
+    studentAnswer: algoOnly,
+    parsed: {
+      criteriaEvaluation: [
+        { criterion: "Algorithmic Approach", maximumMarks: 40, awardedMarks: 40, status: "fully_satisfied", evidence: "Steps", feedback: "Good" },
+        { criterion: "Code Logic, Correctness & Syntax", maximumMarks: 55, awardedMarks: 25, status: "partially_satisfied", evidence: "Pseudocode", feedback: "Partial" },
+        { criterion: "Expected Output", maximumMarks: 5, awardedMarks: 0, status: "not_satisfied", evidence: "Missing", feedback: "Missing" },
+      ],
+      correctConcepts: ["Algorithm steps"],
+      missingConcepts: ["Source Code", "Expected Output"],
+      incorrectConcepts: [],
+      improvementSuggestions: ["Add C code and expected output"],
+    },
+  });
+  assert.equal(geminiGuarded.understandingPercentage, 40);
+  assert.equal(geminiGuarded.errorPercentage, 60);
+  assert.equal(geminiGuarded.totalMarks, 40);
+
+  // Also test Step-prefixed algorithm with semicolons & empty 2. Code Logic / 3. Expected Output headings
+  const algoWithEmptySections = `1. Algorithm
+Step 1: Read n;
+Step 2: Initialize rev = 0;
+Step 3: While (n > 0) repeat: extract digit n % 10, rev = rev * 10 + digit, n = n / 10;
+Step 4: Print rev;
+
+2. Code Logic
+
+3. Expected Output
+`;
+  const resEmptySections = generateConceptualFallback({ question: q, studentAnswer: algoWithEmptySections });
+  assert.equal(resEmptySections.understandingPercentage, 40);
+  assert.equal(resEmptySections.errorPercentage, 60);
+  assert.equal(resEmptySections.totalMarks, 40);
+  assert.equal(resEmptySections.criteriaEvaluation.find((c) => /code\s*logic/i.test(c.criterion)).awardedMarks, 0);
+  assert.equal(resEmptySections.criteriaEvaluation.find((c) => /expected\s*output/i.test(c.criterion)).awardedMarks, 0);
+});
+
+test("9. Code Logic, Correctness & Syntax always uses code-specific evidence and never reuses Algorithmic Approach", () => {
+  const q = {
+    title: "Factorial of N",
+    problemStatement: "Compute the factorial of a positive integer N.",
+    marks: 100,
+  };
+  const norm = normalizeAndValidateRubric(q);
+
+  const ansWithCode = `1. Algorithm
+- Read n and multiply 1..n
+
+2. Code Logic
+#include <stdio.h>
+int main() {
+    int n = 5, fact = 1;
+    printf("%d", fact);
+    return 0;
+}`;
+
+  const guardedCodeEv = validateAndScoreGeminiResponse({
+    normalizedRubric: norm,
+    studentAnswer: ansWithCode,
+    parsed: {
+      criteriaEvaluation: [
+        { criterion: "Algorithmic Approach", maximumMarks: 40, awardedMarks: 40, status: "fully_satisfied", evidence: "Read n and multiply 1..n", feedback: "Good" },
+        { criterion: "Code Logic, Correctness & Syntax", maximumMarks: 55, awardedMarks: 30, status: "partially_satisfied", evidence: "Algorithmic Approach", feedback: "Missing loop" },
+        { criterion: "Expected Output", maximumMarks: 5, awardedMarks: 0, status: "not_satisfied", evidence: "Missing", feedback: "Missing" },
+      ],
+      correctConcepts: [],
+      missingConcepts: [],
+      incorrectConcepts: [],
+      improvementSuggestions: [],
+    },
+  });
+  const codeCrit = guardedCodeEv.criteriaEvaluation.find((c) => /code\s*logic/i.test(c.criterion));
+  assert.notEqual(codeCrit.evidence, "Algorithmic Approach");
+  assert.ok(codeCrit.evidence.includes("#include") || codeCrit.evidence.includes("int main"));
+});
+
+test("10. Code-only submission (no algorithm, no expected output) receives 0/40 Algorithm, 55/55 Code, 0/5 Output", () => {
+  const q = {
+    title: "Reverse a Number",
+    problemStatement: "Write a C program to reverse the digits of a given integer.",
+    marks: 100,
+  };
+  const codeOnly = `#include <stdio.h>
+int main() {
+    int n = 123, rev = 0;
+    while (n > 0) {
+        rev = rev * 10 + (n % 10);
+        n = n / 10;
+    }
+    printf("reverse=%d", rev);
+    return 0;
+}`;
+  const res = generateConceptualFallback({ question: q, studentAnswer: codeOnly });
+  const algoCrit = res.criteriaEvaluation.find((c) => /algorithm/i.test(c.criterion));
+  const codeCrit = res.criteriaEvaluation.find((c) => /code\s*logic/i.test(c.criterion));
+  const outCrit = res.criteriaEvaluation.find((c) => /expected\s*output/i.test(c.criterion));
+  assert.equal(algoCrit.awardedMarks, 0);
+  assert.equal(codeCrit.awardedMarks, 55);
+  assert.equal(outCrit.awardedMarks, 0);
+  assert.equal(res.totalMarks, 55);
+  assert.equal(res.understandingPercentage, 55);
+});

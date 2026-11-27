@@ -16,6 +16,7 @@ import {
   AlertCircle,
   Check,
   FileCode,
+  FileText,
   ShieldCheck,
   Calendar,
   Layers,
@@ -46,6 +47,7 @@ import {
   facultyReturnToNotepad,
   getStudentConceptualReport,
   getFacultyStudentCompletion,
+  getExamFinalReports,
 } from "../../services/examService";
 import Loader from "../../components/common/Loader";
 import ExamQuestionUploadModal from "../../components/exam/ExamQuestionUploadModal";
@@ -59,7 +61,7 @@ const AdminExamDetails = () => {
 
   const tabParam = searchParams.get("tab");
   const [activeTab, setActiveTab] = useState(
-    ["questions", "students", "allocations", "monitoring"].includes(tabParam)
+    ["questions", "students", "allocations", "monitoring", "reports"].includes(tabParam)
       ? tabParam
       : "questions"
   );
@@ -69,6 +71,9 @@ const AdminExamDetails = () => {
   const [questions, setQuestions] = useState([]);
   const [allocations, setAllocations] = useState([]);
   const [monitoringData, setMonitoringData] = useState(null);
+  const [finalReportsData, setFinalReportsData] = useState(null);
+  const [loadingFinalReports, setLoadingFinalReports] = useState(false);
+  const [reportsSearch, setReportsSearch] = useState("");
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
   const [monitoringSearch, setMonitoringSearch] = useState("");
   const [monitoringStatusFilter, setMonitoringStatusFilter] = useState("all");
@@ -85,6 +90,8 @@ const AdminExamDetails = () => {
   // Faculty Evaluation & Code Authorization State
   const [evaluatingRowId, setEvaluatingRowId] = useState(null);
   const [conceptualReportModal, setConceptualReportModal] = useState(null);
+  const [notepadReportModal, setNotepadReportModal] = useState(null);
+  const [codeReportModal, setCodeReportModal] = useState(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [decisionLoading, setDecisionLoading] = useState(false);
   const [facultyFeedbackInput, setFacultyFeedbackInput] = useState("");
@@ -146,12 +153,35 @@ const AdminExamDetails = () => {
     }
   };
 
+  const deduplicateEnrolledStudents = (list = []) => {
+    const seen = new Set();
+    const result = [];
+    for (const enr of list) {
+      const sId =
+        enr?.studentId && typeof enr.studentId === "object"
+          ? enr.studentId._id?.toString()
+          : enr?.studentId?.toString();
+      const key = sId || enr?._id?.toString();
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        result.push(enr);
+      }
+    }
+    return result;
+  };
+
   const fetchExamDetails = async () => {
     try {
       setLoading(true);
       setErrorMsg("");
       const data = await getExamById(examId);
-      setExam(data.exam);
+      const normalizedExam = data.exam
+        ? {
+            ...data.exam,
+            enrolledStudents: deduplicateEnrolledStudents(data.exam.enrolledStudents || []),
+          }
+        : data.exam;
+      setExam(normalizedExam);
       setQuestions(data.questions || []);
       setAllocations(data.allocations || []);
       if (data.exam?.questionsPerStudent) {
@@ -170,6 +200,50 @@ const AdminExamDetails = () => {
       setErrorMsg(err.response?.data?.message || "Failed to load examination details.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const refreshEnrollmentSilent = async () => {
+    try {
+      const data = await getExamById(examId);
+      if (!data?.exam) return;
+
+      const normalizedExam = {
+        ...data.exam,
+        enrolledStudents: deduplicateEnrolledStudents(data.exam.enrolledStudents || []),
+      };
+      setExam((prev) => ({ ...(prev || {}), ...normalizedExam }));
+      setAllocations(data.allocations || []);
+
+      if (Array.isArray(data.exam.participatingStudents)) {
+        const serverIds = data.exam.participatingStudents.map((s) =>
+          typeof s === "object" ? s._id : s
+        );
+        setSelectedStudentIds((prev) => {
+          const next = new Set(prev);
+          for (const id of serverIds) {
+            if (id) next.add(id);
+          }
+          return next;
+        });
+      }
+
+      if (activeTab === "students") {
+        const candData = await getCandidateStudents(searchStudent || "");
+        const uniqueCands = [];
+        const seenCand = new Set();
+        for (const st of candData?.students || []) {
+          const id = st?._id?.toString();
+          if (id && !seenCand.has(id)) {
+            seenCand.add(id);
+            uniqueCands.push(st);
+          }
+        }
+        setCandidateStudents(uniqueCands);
+      }
+    } catch (err) {
+      // Keep last successfully loaded enrollment data on transient errors; retry on next 5s tick
+      console.warn("Background enrollment refresh failed:", err?.message || err);
     }
   };
 
@@ -194,6 +268,18 @@ const AdminExamDetails = () => {
     }
   };
 
+  const fetchFinalReports = async () => {
+    try {
+      setLoadingFinalReports(true);
+      const data = await getExamFinalReports(examId);
+      setFinalReportsData(data);
+    } catch (err) {
+      console.error("Error fetching final reports:", err);
+    } finally {
+      setLoadingFinalReports(false);
+    }
+  };
+
   const handleExtractionComplete = (jobId) => {
     setActiveExtractionJobId(jobId);
     setIsPreviewModalOpen(true);
@@ -213,13 +299,21 @@ const AdminExamDetails = () => {
       fetchCandidates("");
     } else if (activeTab === "monitoring") {
       fetchMonitoring();
+    } else if (activeTab === "reports") {
+      fetchFinalReports();
     }
   }, [activeTab]);
 
   useVisibilityPolling(
     fetchMonitoring,
-    12000,
+    5000,
     activeTab === "monitoring" && autoRefreshEnabled
+  );
+
+  useVisibilityPolling(
+    refreshEnrollmentSilent,
+    5000,
+    Boolean(examId) && exam?.status !== "completed"
   );
 
   const handleStartExam = async () => {
@@ -382,6 +476,7 @@ const AdminExamDetails = () => {
         requiresRevision: err >= 50,
         attemptNumber: latestSub?.attemptNumber || studentRow.conceptualAttemptsCount || 1,
         allAttempts: res.allAttempts || [],
+        latestCodeSubmission: res.latestCodeSubmission || null,
         progress: res.progress,
         facultyDecision: latestSub?.facultyDecision || res.progress?.facultyDecision || studentRow.facultyDecision || "pending",
         isApproved: Boolean(studentRow.conceptualApproved || res.progress?.compilerAllowed),
@@ -394,6 +489,97 @@ const AdminExamDetails = () => {
       );
     } catch (err) {
       setErrorMsg(err.response?.data?.message || "Failed to load conceptual report.");
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  const handleOpenNotepadReport = async (studentRow) => {
+    try {
+      setReportLoading(true);
+      setErrorMsg("");
+      const res = await getStudentConceptualReport(
+        examId,
+        studentRow.studentId,
+        studentRow.targetQuestionId
+      );
+      const latestSub = res.latestSubmission || null;
+      const targetQ = res.question || latestSub?.questionId;
+      const aiEval = latestSub?.aiEvaluation || studentRow.aiEvaluation || null;
+
+      setNotepadReportModal({
+        studentId: studentRow.studentId,
+        studentName: res.student?.username || studentRow.username,
+        rollNo: res.student?.rollNo || studentRow.rollNo || "—",
+        questionNumber: targetQ?.questionNumber || studentRow.questionNumber || "Q1",
+        questionTitle: targetQ?.title || studentRow.questionTitle || studentRow.assignedQuestion,
+        hasSubmitted: Boolean(latestSub?.answerText),
+        answerText: latestSub?.answerText || null,
+        submittedAt: latestSub?.submittedAt || null,
+        attemptNumber: latestSub?.attemptNumber || 0,
+        aiEvaluation: aiEval
+          ? {
+              feedbackSummary: aiEval.overallFeedback || aiEval.feedbackSummary || "",
+              correctConcepts: aiEval.correctConcepts || aiEval.strengths || [],
+              missingConcepts: aiEval.missingConcepts || [],
+              incorrectConcepts:
+                aiEval.incorrectConcepts ||
+                (aiEval.identifiedIssues || []).map((i) => `${i.criterion}: ${i.description}`),
+              suggestions:
+                aiEval.improvementSuggestions ||
+                aiEval.suggestions ||
+                (aiEval.identifiedIssues || []).map((i) => i.hint).filter(Boolean),
+            }
+          : null,
+      });
+    } catch (err) {
+      setErrorMsg(err.response?.data?.message || "Failed to load Notepad report.");
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  const handleOpenCodeReport = async (studentRow) => {
+    try {
+      setReportLoading(true);
+      setErrorMsg("");
+      const res = await getStudentConceptualReport(
+        examId,
+        studentRow.studentId,
+        studentRow.targetQuestionId
+      );
+      const targetQ = res.question || res.latestSubmission?.questionId;
+      const codeSub = res.latestCodeSubmission || null;
+      const qKey = studentRow.targetQuestionId ? String(studentRow.targetQuestionId) : null;
+      const fallbackProgCode =
+        (qKey && res.progress?.questionProgress?.[qKey]?.currentCode) ||
+        res.progress?.currentCode ||
+        null;
+      const resolvedCode = codeSub?.code || (fallbackProgCode && fallbackProgCode.trim() ? fallbackProgCode : null);
+
+      setCodeReportModal({
+        studentId: studentRow.studentId,
+        studentName: res.student?.username || studentRow.username,
+        rollNo: res.student?.rollNo || studentRow.rollNo || "—",
+        questionNumber: targetQ?.questionNumber || studentRow.questionNumber || "Q1",
+        questionTitle: targetQ?.title || studentRow.questionTitle || studentRow.assignedQuestion,
+        hasSubmission: Boolean(resolvedCode),
+        code: resolvedCode,
+        language: codeSub?.language || "c",
+        status: codeSub?.status || null,
+        testCasesPassed: codeSub?.testCasesPassed ?? 0,
+        totalTestCases: codeSub?.totalTestCases ?? 0,
+        testCasesFailed: Math.max(
+          0,
+          (codeSub?.totalTestCases ?? 0) - (codeSub?.testCasesPassed ?? 0)
+        ),
+        allPassed: Boolean(codeSub?.allPassed),
+        testCaseResults: codeSub?.testCaseResults || [],
+        compilerOutput: codeSub?.compilerOutput || "",
+        submittedAt: codeSub?.submittedAt || null,
+      });
+    } catch (err) {
+      setErrorMsg(err.response?.data?.message || "Failed to load Code Editor report.");
     } finally {
       setReportLoading(false);
     }
@@ -832,12 +1018,11 @@ const AdminExamDetails = () => {
               Limit
             </span>
           </div>
-          <p className="text-xs sm:text-sm font-medium text-slate-500">Duration / Marks</p>
+          <p className="text-xs sm:text-sm font-medium text-slate-500">Duration</p>
           <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-800">
             {exam.durationMinutes >= 60 && exam.durationMinutes % 60 === 0
               ? `${exam.durationMinutes / 60}h (${exam.durationMinutes}m)`
-              : `${exam.durationMinutes}m`}{" "}
-            <span className="text-sm font-normal text-slate-400">/ {exam.totalMarks} pts</span>
+              : `${exam.durationMinutes}m`}
           </p>
           {exam.status === "in_progress" && exam.startedAt && (
             <div className="mt-2 pt-2 border-t border-slate-100 space-y-2">
@@ -938,6 +1123,19 @@ const AdminExamDetails = () => {
             <RefreshCw size={16} />
             <span>Live Monitoring &amp; Results</span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => handleTabChange("reports")}
+            className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition ${
+              activeTab === "reports"
+                ? "bg-indigo-50 text-indigo-700 shadow-xs"
+                : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+            }`}
+          >
+            <FileText size={16} />
+            <span>Final Reports</span>
+          </button>
         </nav>
       </div>
 
@@ -1033,9 +1231,6 @@ const AdminExamDetails = () => {
                           }`}
                         >
                           {q.difficulty}
-                        </span>
-                        <span className="text-xs font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md">
-                          {q.marks} Marks
                         </span>
                         <span className="text-xs text-slate-400 font-mono">
                           Limit: {q.timeLimit}s
@@ -1594,6 +1789,15 @@ const AdminExamDetails = () => {
                       .map((row) => {
                         const rowKey = row.rowId || `${row.studentId}_${row.targetQuestionId || ""}`;
                         const isRowEvaluating = row.evaluationAction === "evaluating" || evaluatingRowId === rowKey;
+                        const examEndMs = exam?.officialEndTime
+                          ? new Date(exam.officialEndTime).getTime()
+                          : exam?.startedAt && exam?.durationMinutes
+                          ? new Date(exam.startedAt).getTime() + Number(exam.durationMinutes) * 60 * 1000
+                          : null;
+                        const isExamEndedForReports =
+                          isCompleted ||
+                          monitoringData?.status === "completed" ||
+                          Boolean(examEndMs && Date.now() >= examEndMs);
                         return (
                         <tr key={rowKey} className="transition hover:bg-slate-50/60">
                           {/* 1. Roll No */}
@@ -1640,28 +1844,41 @@ const AdminExamDetails = () => {
 
                           {/* 5. AI Evaluation */}
                           <td className="px-5 py-3.5 text-center">
-                            {row.lastConceptualError !== null ? (
-                              <span
-                                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border ${
-                                  row.lastConceptualError < 50
-                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                    : "bg-rose-50 text-rose-700 border-rose-200"
-                                }`}
-                              >
-                                {row.lastConceptualError < 50 ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
-                                {row.lastConceptualError}% Error ({row.lastConceptualError < 50 ? "PASS" : "FAIL"})
-                              </span>
-                            ) : isRowEvaluating ? (
-                              <span className="inline-flex items-center gap-1 text-xs text-indigo-600 font-semibold">
-                                <Sparkles size={13} className="animate-spin" /> Evaluating...
-                              </span>
-                            ) : row.notepadStatus === "Submitted" ? (
-                              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
-                                Awaiting Faculty Evaluation
-                              </span>
-                            ) : (
-                              <span className="text-xs text-slate-400">Not Submitted</span>
-                            )}
+                            <div className="flex flex-col items-center gap-1.5">
+                              {row.lastConceptualError !== null ? (
+                                <span
+                                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border ${
+                                    row.lastConceptualError < 50
+                                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                      : "bg-rose-50 text-rose-700 border-rose-200"
+                                  }`}
+                                >
+                                  {row.lastConceptualError < 50 ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
+                                  {row.lastConceptualError}% Error ({row.lastConceptualError < 50 ? "PASS" : "FAIL"})
+                                </span>
+                              ) : isRowEvaluating ? (
+                                <span className="inline-flex items-center gap-1 text-xs text-indigo-600 font-semibold">
+                                  <Sparkles size={13} className="animate-spin" /> Evaluating...
+                                </span>
+                              ) : row.notepadStatus === "Submitted" ? (
+                                <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
+                                  Awaiting Faculty Evaluation
+                                </span>
+                              ) : (
+                                <span className="text-xs text-slate-400">Not Submitted</span>
+                              )}
+                              {isExamEndedForReports && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenNotepadReport(row)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-indigo-200 bg-indigo-50/70 hover:bg-indigo-100 text-indigo-700 text-[11px] font-semibold transition"
+                                  title="View student's final Notepad submission"
+                                >
+                                  <FileText size={11} />
+                                  Notepad Report
+                                </button>
+                              )}
+                            </div>
                           </td>
 
                           {/* 6. Evaluation Action (Faculty-Controlled) */}
@@ -1801,6 +2018,17 @@ const AdminExamDetails = () => {
                               <Eye size={12} />
                               Details
                             </button>
+                            {(isExamEndedForReports || (row.codeStatus && row.codeStatus !== "not_submitted") || row.isQuestionSolved) && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenCodeReport(row)}
+                                className="ml-1.5 inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100 text-emerald-700 text-[11px] font-semibold transition"
+                                title="View student's latest Code Editor submission"
+                              >
+                                <FileCode size={12} />
+                                Code Report
+                              </button>
+                            )}
                           </td>
                         </tr>
                         );
@@ -1855,6 +2083,294 @@ const AdminExamDetails = () => {
       )}
 
       {/* =========================================================================
+          TAB 5: POST-EXAM FINAL REPORTS (NOTEPAD + CODE EDITOR)
+         ========================================================================= */}
+      {activeTab === "reports" && (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <FileText size={20} className="text-indigo-600" />
+                Final Student Reports (Notepad &amp; Code Editor)
+              </h2>
+              <p className="text-xs text-slate-500">
+                Complete Notepad conceptual answers, AI evaluation feedback, latest submitted source code, and test case results. Available only after the examination ends.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={fetchFinalReports}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition shadow-xs"
+            >
+              <RefreshCw size={14} className={loadingFinalReports ? "animate-spin" : ""} /> Refresh Reports
+            </button>
+          </div>
+
+          {loadingFinalReports ? (
+            <div className="py-12 text-center text-sm text-slate-500 bg-white rounded-2xl border border-slate-200">
+              <Loader />
+              <p className="mt-2 text-xs text-slate-400">Loading final examination reports...</p>
+            </div>
+          ) : !finalReportsData?.examEnded ? (
+            <div className="p-8 text-center bg-white rounded-2xl border border-amber-200 space-y-2">
+              <Clock size={28} className="mx-auto text-amber-500" />
+              <h3 className="text-sm font-bold text-slate-800">
+                Final Reports Locked Until Exam Ends
+              </h3>
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                {finalReportsData?.message ||
+                  "Complete Notepad and Code Editor reports for all students will appear here automatically once the exam duration expires or you end the examination."}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {/* Search Bar */}
+              <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs">
+                <div className="relative flex-1 max-w-md">
+                  <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search student by name, roll number, or email..."
+                    value={reportsSearch}
+                    onChange={(e) => setReportsSearch(e.target.value)}
+                    className="w-full pl-9 pr-3.5 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50/60 focus:bg-white focus:border-indigo-500 focus:outline-hidden transition"
+                  />
+                </div>
+                <span className="text-xs text-slate-500 font-medium">
+                  {(finalReportsData.reports || []).length} Student(s)
+                </span>
+              </div>
+
+              {(finalReportsData.reports || [])
+                .filter((st) => {
+                  if (!reportsSearch.trim()) return true;
+                  const q = reportsSearch.trim().toLowerCase();
+                  return (
+                    st.username?.toLowerCase().includes(q) ||
+                    st.rollNo?.toLowerCase().includes(q) ||
+                    st.email?.toLowerCase().includes(q)
+                  );
+                })
+                .map((studentReport) => (
+                  <div
+                    key={studentReport.studentId}
+                    className="rounded-2xl border border-slate-200 bg-white shadow-xs overflow-hidden"
+                  >
+                    {/* Student Header (1 card per student) */}
+                    <div className="px-5 py-4 bg-slate-50/80 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <span className="px-2.5 py-1 rounded-lg bg-indigo-100 text-indigo-800 font-mono font-bold text-xs">
+                          {studentReport.rollNo || "—"}
+                        </span>
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-900">
+                            {studentReport.username}
+                          </h3>
+                          <p className="text-xs text-slate-500">{studentReport.email || "No email"}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 font-semibold border border-slate-200">
+                          {(studentReport.questions || []).length} Question(s)
+                        </span>
+                        <span
+                          className={`px-3 py-1 rounded-full font-bold border ${
+                            studentReport.examStatus === "Completed"
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : studentReport.examStatus === "In Progress"
+                              ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                              : "bg-slate-100 text-slate-600 border-slate-200"
+                          }`}
+                        >
+                          {studentReport.examStatus}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Per-Question Notepad + Code Editor Reports */}
+                    <div className="divide-y divide-slate-200">
+                      {(studentReport.questions || []).length === 0 ? (
+                        <div className="p-5 text-xs text-slate-500">
+                          No questions assigned to this student.
+                        </div>
+                      ) : (
+                        studentReport.questions.map((qRep, qIdx) => (
+                          <div key={qRep.questionId || qIdx} className="p-5 space-y-4">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <span className="px-2 py-0.5 rounded bg-indigo-600 text-white font-bold text-xs">
+                                  {qRep.questionNumber}
+                                </span>
+                                <h4 className="text-sm font-bold text-slate-900">{qRep.title}</h4>
+                              </div>
+                              <span className="text-[11px] font-semibold text-slate-500 uppercase">
+                                {qRep.difficulty}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                              {/* Notepad Report */}
+                              <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 space-y-3">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                                    Notepad Report
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-white border border-slate-200 text-slate-700">
+                                    {qRep.notepadReport?.notepadStatus || "Pending"}
+                                  </span>
+                                </div>
+
+                                {qRep.notepadReport?.answerText ? (
+                                  <div className="p-3 rounded-xl bg-slate-900 text-slate-100 font-mono text-xs max-h-56 overflow-y-auto whitespace-pre-wrap leading-relaxed border border-slate-800">
+                                    {qRep.notepadReport.answerText}
+                                  </div>
+                                ) : (
+                                  <div className="p-3 rounded-xl bg-white text-slate-400 text-xs border border-slate-200">
+                                    No Notepad answer submitted.
+                                  </div>
+                                )}
+
+                                {qRep.notepadReport?.aiEvaluation && (
+                                  <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-2 text-xs">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <span className="font-bold text-indigo-700 flex items-center gap-1">
+                                        <Sparkles size={13} /> AI Evaluation Feedback
+                                      </span>
+                                      <div className="flex items-center gap-2">
+                                        {qRep.notepadReport.aiEvaluation.understandingPercentage !== null && (
+                                          <span className="px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 font-semibold">
+                                            Correctness: {qRep.notepadReport.aiEvaluation.understandingPercentage}%
+                                          </span>
+                                        )}
+                                        {qRep.notepadReport.aiEvaluation.errorPercentage !== null && (
+                                          <span
+                                            className={`px-2 py-0.5 rounded font-semibold ${
+                                              qRep.notepadReport.aiEvaluation.errorPercentage < 50
+                                                ? "bg-emerald-50 text-emerald-700"
+                                                : "bg-rose-50 text-rose-700"
+                                            }`}
+                                          >
+                                            Error: {qRep.notepadReport.aiEvaluation.errorPercentage}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                    {qRep.notepadReport.aiEvaluation.overallFeedback && (
+                                      <p className="text-slate-700 leading-relaxed">
+                                        {qRep.notepadReport.aiEvaluation.overallFeedback}
+                                      </p>
+                                    )}
+                                    {qRep.notepadReport.aiEvaluation.correctConcepts?.length > 0 && (
+                                      <div className="text-emerald-700">
+                                        <strong>Correct:</strong>{" "}
+                                        {qRep.notepadReport.aiEvaluation.correctConcepts.join("; ")}
+                                      </div>
+                                    )}
+                                    {qRep.notepadReport.aiEvaluation.missingConcepts?.length > 0 && (
+                                      <div className="text-amber-700">
+                                        <strong>Missing:</strong>{" "}
+                                        {qRep.notepadReport.aiEvaluation.missingConcepts.join("; ")}
+                                      </div>
+                                    )}
+                                    {qRep.notepadReport.aiEvaluation.incorrectConcepts?.length > 0 && (
+                                      <div className="text-rose-700">
+                                        <strong>Incorrect:</strong>{" "}
+                                        {qRep.notepadReport.aiEvaluation.incorrectConcepts.join("; ")}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Code Editor Report */}
+                              <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 space-y-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                                    Code Editor Report
+                                  </span>
+                                  <div className="flex items-center gap-2 text-[11px]">
+                                    <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-mono font-bold uppercase">
+                                      {qRep.codeReport?.language || "c"}
+                                    </span>
+                                    {qRep.codeReport?.hasSubmission && (
+                                      <>
+                                        <span
+                                          className={`px-2 py-0.5 rounded-full font-mono font-bold border ${
+                                            qRep.codeReport.allPassed
+                                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                              : "bg-rose-50 text-rose-700 border-rose-200"
+                                          }`}
+                                        >
+                                          Test Cases Passed: {qRep.codeReport.testCasesPassed ?? 0}/
+                                          {qRep.codeReport.totalTestCases ?? 0}
+                                        </span>
+                                        <span className="px-2 py-0.5 rounded-full font-mono font-semibold bg-slate-100 text-slate-700 border border-slate-200">
+                                          Failed Test Cases: {Math.max(0, (qRep.codeReport.totalTestCases ?? 0) - (qRep.codeReport.testCasesPassed ?? 0))}
+                                        </span>
+                                      </>
+                                    )}
+                                    {qRep.codeReport?.status && (
+                                      <span className="px-2 py-0.5 rounded-full bg-white border border-slate-200 text-slate-700 uppercase font-semibold">
+                                        {qRep.codeReport.status.replace(/_/g, " ")}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {qRep.codeReport?.code ? (
+                                  <pre className="p-3 rounded-xl bg-slate-950 text-slate-100 font-mono text-xs max-h-60 overflow-auto whitespace-pre leading-relaxed border border-slate-800 select-text">
+                                    <code>{qRep.codeReport.code}</code>
+                                  </pre>
+                                ) : (
+                                  <div className="p-3 rounded-xl bg-white text-slate-500 text-xs font-medium border border-slate-200">
+                                    No code submitted
+                                  </div>
+                                )}
+
+                                {qRep.codeReport?.compilerOutput && (
+                                  <pre className="p-2.5 rounded-xl bg-rose-950/90 text-rose-200 font-mono text-[11px] max-h-28 overflow-auto whitespace-pre-wrap border border-rose-900">
+                                    {qRep.codeReport.compilerOutput}
+                                  </pre>
+                                )}
+
+                                {qRep.codeReport?.testCaseResults?.length > 0 && (
+                                  <div className="space-y-1.5">
+                                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
+                                      Individual Test Case Results
+                                    </span>
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                                      {qRep.codeReport.testCaseResults.map((tc, tIdx) => (
+                                        <div
+                                          key={tIdx}
+                                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono border flex items-center justify-between ${
+                                            tc.status === "passed"
+                                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                              : "bg-rose-50 text-rose-700 border-rose-200"
+                                          }`}
+                                        >
+                                          <span>#{tc.testCaseNumber}</span>
+                                          <span className="font-bold uppercase">
+                                            {tc.status === "passed" ? "Passed" : tc.status.replace(/_/g, " ")}
+                                          </span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* =========================================================================
           FACULTY AI EVALUATION REPORT & DECISION MODAL
          ========================================================================= */}
       {conceptualReportModal && (
@@ -1903,13 +2419,11 @@ const AdminExamDetails = () => {
               <div className="grid grid-cols-3 gap-3">
                 <div className="p-3.5 rounded-xl bg-indigo-50/70 border border-indigo-200">
                   <span className="text-[11px] font-semibold text-indigo-700 uppercase tracking-wider block">
-                    Marks Awarded
+                    AI Evaluation Score
                   </span>
                   <span className="text-2xl font-black text-indigo-700 font-mono">
-                    {conceptualReportModal.marksObtained !== undefined && conceptualReportModal.marksObtained !== null
-                      ? conceptualReportModal.marksObtained
-                      : Math.round(((conceptualReportModal.understandingPercentage || 0) / 100) * (conceptualReportModal.totalMarks || 10) * 10) / 10}
-                    <span className="text-sm font-normal text-slate-500"> / {conceptualReportModal.totalMarks || 10}</span>
+                    {conceptualReportModal.understandingPercentage}
+                    <span className="text-sm font-normal text-slate-500"> / 100</span>
                   </span>
                 </div>
 
@@ -1960,6 +2474,50 @@ const AdminExamDetails = () => {
                 </div>
               </div>
 
+              {/* Latest Submitted Source Code */}
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                    Latest Submitted Code
+                  </span>
+                  {conceptualReportModal.latestCodeSubmission ? (
+                    <div className="flex items-center gap-2 text-[11px] font-semibold">
+                      <span
+                        className={`px-2 py-0.5 rounded-full border ${
+                          conceptualReportModal.latestCodeSubmission.allPassed
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            : "bg-rose-50 text-rose-700 border-rose-200"
+                        }`}
+                      >
+                        Test Cases: {conceptualReportModal.latestCodeSubmission.testCasesPassed ?? 0}/
+                        {conceptualReportModal.latestCodeSubmission.totalTestCases ?? 0}
+                      </span>
+                      {conceptualReportModal.latestCodeSubmission.status && (
+                        <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 uppercase text-[10px]">
+                          {conceptualReportModal.latestCodeSubmission.status.replace(/_/g, " ")}
+                        </span>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+                {conceptualReportModal.latestCodeSubmission?.code ? (
+                  <div className="space-y-2">
+                    <pre className="p-3.5 rounded-xl bg-slate-950 text-slate-100 font-mono text-xs max-h-64 overflow-auto whitespace-pre leading-relaxed border border-slate-800 select-text">
+                      <code>{conceptualReportModal.latestCodeSubmission.code}</code>
+                    </pre>
+                    {conceptualReportModal.latestCodeSubmission.compilerOutput && (
+                      <pre className="p-3 rounded-xl bg-rose-950/90 text-rose-200 font-mono text-[11px] max-h-32 overflow-auto whitespace-pre-wrap border border-rose-900">
+                        {conceptualReportModal.latestCodeSubmission.compilerOutput}
+                      </pre>
+                    )}
+                  </div>
+                ) : (
+                  <div className="p-3.5 rounded-xl bg-slate-50 text-slate-500 text-xs border border-slate-200">
+                    No submission yet.
+                  </div>
+                )}
+              </div>
+
               {/* AI Feedback Summary */}
               {conceptualReportModal.feedbackSummary && (
                 <div className="p-3.5 rounded-xl bg-slate-100 border border-slate-200 space-y-1">
@@ -1997,7 +2555,16 @@ const AdminExamDetails = () => {
                   </span>
                   {conceptualReportModal.criteriaEvaluation?.length > 0 ? (
                     <div className="space-y-2">
-                      {conceptualReportModal.criteriaEvaluation.map((crit, idx) => (
+                      {(() => {
+                        const totalMax = conceptualReportModal.criteriaEvaluation.reduce(
+                          (sum, c) => sum + (Number(c.maximumMarks) || 0),
+                          0
+                        );
+                        const scale = totalMax > 0 ? 100 / totalMax : 1;
+                        return conceptualReportModal.criteriaEvaluation.map((crit, idx) => {
+                          const scaledMax = Math.round((Number(crit.maximumMarks) || 0) * scale * 10) / 10;
+                          const scaledAwarded = Math.round((Number(crit.awardedMarks) || 0) * scale * 10) / 10;
+                          return (
                         <div key={idx} className="p-3 rounded-lg bg-white border border-slate-200 text-xs space-y-1.5">
                           <div className="flex items-center justify-between gap-2">
                             <span className="font-bold text-slate-800">{crit.criterion}</span>
@@ -2014,7 +2581,7 @@ const AdminExamDetails = () => {
                                 {String(crit.status || "evaluated").replace(/_/g, " ")}
                               </span>
                               <span className="font-mono font-bold text-indigo-700">
-                                {crit.awardedMarks} / {crit.maximumMarks}
+                                {scaledAwarded} / {scaledMax}
                               </span>
                             </div>
                           </div>
@@ -2029,7 +2596,9 @@ const AdminExamDetails = () => {
                             </p>
                           )}
                         </div>
-                      ))}
+                          );
+                        });
+                      })()}
                     </div>
                   ) : (
                     <div className="space-y-1 text-xs text-slate-600">
@@ -2530,13 +3099,6 @@ const AdminExamDetails = () => {
                   </div>
                 </div>
                 <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                  <div className="text-slate-500">Overall Score</div>
-                  <div className="font-mono font-bold text-indigo-700 mt-0.5">
-                    {completionData.overallScore ?? completionData.marks ?? 0} /{" "}
-                    {completionData.totalMarks ?? exam.totalMarks ?? 100}
-                  </div>
-                </div>
-                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
                   <div className="text-slate-500">AI Evaluation Status</div>
                   <div className="font-semibold text-slate-900 mt-0.5">
                     {completionData.aiEvaluationStatus || completionData.conceptualAnswerStatus}
@@ -2559,10 +3121,294 @@ const AdminExamDetails = () => {
               </div>
             ) : null}
 
+            {completionData &&
+              completionData.examType !== "viva" &&
+              (Array.isArray(completionData.questionCodeSubmissions) &&
+              completionData.questionCodeSubmissions.length > 0 ? (
+                <div className="space-y-3 pt-2 border-t border-slate-100">
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                    Latest Submitted Code
+                  </div>
+                  {completionData.questionCodeSubmissions.map((qSub, idx) => (
+                    <div
+                      key={qSub.questionId || idx}
+                      className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <span className="font-bold text-slate-800">
+                          {qSub.questionNumber ? `${qSub.questionNumber} – ` : ""}
+                          {qSub.questionTitle}
+                        </span>
+                        {qSub.code ? (
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`px-2 py-0.5 rounded-full font-mono font-bold text-[11px] border ${
+                                qSub.allPassed
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : "bg-rose-50 text-rose-700 border-rose-200"
+                              }`}
+                            >
+                              Test Cases: {qSub.testCasesPassed ?? 0}/{qSub.totalTestCases ?? 0}
+                            </span>
+                            {qSub.status && (
+                              <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 uppercase text-[10px] font-semibold">
+                                {qSub.status.replace(/_/g, " ")}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-[11px] text-slate-400 font-medium">
+                            No submission yet.
+                          </span>
+                        )}
+                      </div>
+                      {qSub.code ? (
+                        <>
+                          <pre className="p-3 rounded-xl bg-slate-950 text-slate-100 font-mono text-xs max-h-60 overflow-auto whitespace-pre leading-relaxed border border-slate-800 select-text">
+                            <code>{qSub.code}</code>
+                          </pre>
+                          {qSub.compilerOutput && (
+                            <pre className="p-2.5 rounded-xl bg-rose-950/90 text-rose-200 font-mono text-[11px] max-h-28 overflow-auto whitespace-pre-wrap border border-rose-900">
+                              {qSub.compilerOutput}
+                            </pre>
+                          )}
+                        </>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-2 pt-2 border-t border-slate-100">
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                    Latest Submitted Code
+                  </div>
+                  {completionData.submission?.code ? (
+                    <pre className="p-3 rounded-xl bg-slate-950 text-slate-100 font-mono text-xs max-h-60 overflow-auto whitespace-pre leading-relaxed border border-slate-800 select-text">
+                      <code>{completionData.submission.code}</code>
+                    </pre>
+                  ) : (
+                    <div className="p-3 rounded-xl bg-slate-50 text-slate-500 text-xs border border-slate-200">
+                      No submission yet.
+                    </div>
+                  )}
+                </div>
+              ))}
+
             <div className="flex justify-end pt-2 border-t border-slate-100">
               <button
                 type="button"
                 onClick={() => setCompletionModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Post-Exam Notepad Report Modal (Per Student & Question) */}
+      {notepadReportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 my-8 max-h-[92vh] flex flex-col">
+            <div className="flex justify-between items-start pb-4 border-b border-slate-100 flex-shrink-0">
+              <div>
+                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                  <FileText size={18} className="text-indigo-600" />
+                  Notepad Report
+                </h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Student: <strong className="text-slate-700">{notepadReportModal.studentName}</strong> ({notepadReportModal.rollNo}) •
+                  Question: <strong className="text-slate-700">{notepadReportModal.questionNumber} – {notepadReportModal.questionTitle}</strong>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNotepadReportModal(null)}
+                className="text-slate-400 hover:text-slate-600 rounded-lg p-1 transition"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 pr-1 py-4 space-y-4">
+              {notepadReportModal.submittedAt && (
+                <div className="text-xs text-slate-500">
+                  Submitted At:{" "}
+                  <strong className="text-slate-700 font-mono">
+                    {new Date(notepadReportModal.submittedAt).toLocaleString()}
+                  </strong>
+                  {notepadReportModal.attemptNumber > 0 && (
+                    <span className="ml-2">(Attempt #{notepadReportModal.attemptNumber})</span>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">
+                  Final Submitted Notepad Answer
+                </span>
+                {notepadReportModal.hasSubmitted && notepadReportModal.answerText ? (
+                  <div className="p-4 rounded-xl bg-slate-950 text-slate-100 font-mono text-xs max-h-72 overflow-y-auto whitespace-pre-wrap leading-relaxed border border-slate-800">
+                    {notepadReportModal.answerText}
+                  </div>
+                ) : (
+                  <div className="p-4 rounded-xl bg-slate-50 text-slate-500 text-xs font-medium border border-slate-200">
+                    Not Submitted
+                  </div>
+                )}
+              </div>
+
+              {notepadReportModal.aiEvaluation && (
+                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs">
+                  <span className="font-bold text-indigo-700 flex items-center gap-1.5 uppercase tracking-wider">
+                    <Sparkles size={13} /> AI Evaluation Feedback
+                  </span>
+                  {notepadReportModal.aiEvaluation.feedbackSummary && (
+                    <p className="text-slate-700 leading-relaxed">
+                      {notepadReportModal.aiEvaluation.feedbackSummary}
+                    </p>
+                  )}
+                  {notepadReportModal.aiEvaluation.correctConcepts?.length > 0 && (
+                    <div className="text-emerald-700">
+                      <strong>Correct:</strong> {notepadReportModal.aiEvaluation.correctConcepts.join("; ")}
+                    </div>
+                  )}
+                  {notepadReportModal.aiEvaluation.missingConcepts?.length > 0 && (
+                    <div className="text-amber-700">
+                      <strong>Missing:</strong> {notepadReportModal.aiEvaluation.missingConcepts.join("; ")}
+                    </div>
+                  )}
+                  {notepadReportModal.aiEvaluation.incorrectConcepts?.length > 0 && (
+                    <div className="text-rose-700">
+                      <strong>Incorrect:</strong> {notepadReportModal.aiEvaluation.incorrectConcepts.join("; ")}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setNotepadReportModal(null)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Post-Exam Code Editor Report Modal (Per Student & Question) */}
+      {codeReportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 my-8 max-h-[92vh] flex flex-col">
+            <div className="flex justify-between items-start pb-4 border-b border-slate-100 flex-shrink-0">
+              <div>
+                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                  <FileCode size={18} className="text-emerald-600" />
+                  Code Editor Report
+                </h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Student: <strong className="text-slate-700">{codeReportModal.studentName}</strong> ({codeReportModal.rollNo}) •
+                  Question: <strong className="text-slate-700">{codeReportModal.questionNumber} – {codeReportModal.questionTitle}</strong>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCodeReportModal(null)}
+                className="text-slate-400 hover:text-slate-600 rounded-lg p-1 transition"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 pr-1 py-4 space-y-4">
+              {codeReportModal.hasSubmission ? (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-1 rounded bg-slate-100 text-slate-700 font-mono font-bold uppercase border border-slate-200">
+                        Language: {codeReportModal.language || "c"}
+                      </span>
+                      <span
+                        className={`px-2.5 py-1 rounded-full font-mono font-bold border ${
+                          codeReportModal.allPassed
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            : "bg-rose-50 text-rose-700 border-rose-200"
+                        }`}
+                      >
+                        Test Cases Passed: {codeReportModal.testCasesPassed}/{codeReportModal.totalTestCases}
+                      </span>
+                      <span className="px-2.5 py-1 rounded-full font-mono font-semibold bg-slate-100 text-slate-700 border border-slate-200">
+                        Failed Test Cases: {codeReportModal.testCasesFailed}
+                      </span>
+                    </div>
+                    {codeReportModal.submittedAt && (
+                      <span className="text-slate-500 font-mono">
+                        {new Date(codeReportModal.submittedAt).toLocaleString()}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">
+                      Latest Submitted Source Code
+                    </span>
+                    <pre className="p-4 rounded-xl bg-slate-950 text-slate-100 font-mono text-xs max-h-72 overflow-auto whitespace-pre leading-relaxed border border-slate-800 select-text">
+                      <code>{codeReportModal.code}</code>
+                    </pre>
+                  </div>
+
+                  {codeReportModal.compilerOutput && (
+                    <div className="space-y-1.5">
+                      <span className="text-xs font-bold uppercase tracking-wider text-rose-600 block">
+                        Compiler / Execution Output
+                      </span>
+                      <pre className="p-3 rounded-xl bg-rose-950/90 text-rose-200 font-mono text-[11px] max-h-32 overflow-auto whitespace-pre-wrap border border-rose-900">
+                        {codeReportModal.compilerOutput}
+                      </pre>
+                    </div>
+                  )}
+
+                  {codeReportModal.testCaseResults?.length > 0 && (
+                    <div className="space-y-1.5">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">
+                        Individual Test Case Results
+                      </span>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                        {codeReportModal.testCaseResults.map((tc, tIdx) => (
+                          <div
+                            key={tIdx}
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono border flex items-center justify-between ${
+                              tc.status === "passed"
+                                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                : "bg-rose-50 text-rose-700 border-rose-200"
+                            }`}
+                          >
+                            <span>Test #{tc.testCaseNumber}</span>
+                            <span className="font-bold uppercase">
+                              {tc.status === "passed" ? "Passed" : String(tc.status || "failed").replace(/_/g, " ")}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="p-4 rounded-xl bg-slate-50 text-slate-500 text-xs font-medium border border-slate-200">
+                  No code submitted
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setCodeReportModal(null)}
                 className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition"
               >
                 Close

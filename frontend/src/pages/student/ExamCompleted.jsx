@@ -409,15 +409,6 @@ const ExamCompleted = () => {
                   : "Not Submitted"}
               </div>
             </div>
-
-            {data?.marks !== null && data?.marks !== undefined && (
-              <div className="space-y-1">
-                <span className="text-slate-400">Score / Marks:</span>
-                <div className="text-emerald-400 font-mono font-bold">
-                  {data.marks} / {data.totalMarks ?? exam?.totalMarks ?? 100}
-                </div>
-              </div>
-            )}
           </div>
         </div>
 

@@ -320,14 +320,10 @@ const StudentExams = () => {
                     )}
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2 pt-3 border-t border-slate-100 text-xs text-slate-600">
+                  <div className="flex items-center gap-2 pt-3 border-t border-slate-100 text-xs text-slate-600">
                     <div className="flex items-center gap-1.5">
                       <Clock className="w-3.5 h-3.5 text-slate-400" />
                       <span>{exam.durationMinutes} Minutes</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <Award className="w-3.5 h-3.5 text-slate-400" />
-                      <span>{exam.totalMarks} Marks</span>
                     </div>
                   </div>
                 </div>

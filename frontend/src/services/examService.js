@@ -229,7 +229,7 @@ export const facultyReturnToNotepad = async (examId, studentId, questionId, feed
 
 export const getStudentConceptualReport = async (examId, studentId, questionId) => {
   const response = await api.get(`/exams/${examId}/students/${studentId}/conceptual-report`, {
-    params: { questionId },
+    params: questionId ? { questionId } : {},
   });
   return response.data;
 };
@@ -295,6 +295,11 @@ export const getStudentExamCompletion = async (examId) => {
 
 export const getFacultyStudentCompletion = async (examId, studentId) => {
   const response = await api.get(`/exams/${examId}/students/${studentId}/completion`);
+  return response.data;
+};
+
+export const getExamFinalReports = async (examId) => {
+  const response = await api.get(`/exams/${examId}/final-reports`);
   return response.data;
 };
 

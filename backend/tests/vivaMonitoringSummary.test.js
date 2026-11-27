@@ -234,3 +234,98 @@ test("Internal Faculty Monitoring: displays per-question Solution Status (Solved
     ExamQuestion.find = origQFind;
   }
 });
+
+test("Internal Faculty Monitoring: question_assigned without acknowledgment stays Not Started, and solving all questions without finishing stays In Progress", async () => {
+  const origExamFindById = Exam.findById;
+  const origAllocFind = ExamAllocation.find;
+  const origProgFind = StudentExamProgress.find;
+  const origAnsFind = ExamAnswerSubmission.find;
+  const origCodeFind = ExamCodeSubmission.find;
+  const origQFind = ExamQuestion.find;
+
+  const examId = new mongoose.Types.ObjectId();
+  const q1 = new mongoose.Types.ObjectId();
+  const q2 = new mongoose.Types.ObjectId();
+  const assignedList = [
+    { _id: q1, title: "Q1", questionNumber: "Q1", difficulty: "Easy" },
+    { _id: q2, title: "Q2", questionNumber: "Q2", difficulty: "Medium" },
+  ];
+
+  const sEnrolledNotStarted = new mongoose.Types.ObjectId();
+  const sAllSolvedNotFinished = new mongoose.Types.ObjectId();
+
+  try {
+    Exam.findById = () => ({
+      select: () => ({
+        lean: async () => ({
+          _id: examId,
+          title: "Internal Coding Exam",
+          examType: "internal",
+          status: "in_progress",
+          questionsPerStudent: 2,
+        }),
+      }),
+    });
+
+    ExamAllocation.find = () => ({
+      populate: () => ({
+        populate: () => ({
+          populate: () => ({
+            lean: async () => [
+              { studentId: { _id: sEnrolledNotStarted, username: "Enrolled Only", rollNo: "S201", email: "e@college.edu" }, assignedQuestionIds: assignedList },
+              { studentId: { _id: sAllSolvedNotFinished, username: "Solved Not Finished", rollNo: "S202", email: "f@college.edu" }, assignedQuestionIds: assignedList },
+            ],
+          }),
+        }),
+      }),
+    });
+
+    StudentExamProgress.find = () => ({
+      select: () => ({
+        lean: async () => [
+          {
+            studentId: sEnrolledNotStarted,
+            status: "question_assigned",
+            instructionsAcknowledged: false,
+            questionProgress: {
+              [q1.toString()]: { status: "not_started" },
+              [q2.toString()]: { status: "not_started" },
+            },
+          },
+          {
+            studentId: sAllSolvedNotFinished,
+            status: "coding_in_progress",
+            instructionsAcknowledged: true,
+            questionProgress: {
+              [q1.toString()]: { status: "completed", isCompleted: true },
+              [q2.toString()]: { status: "completed", isCompleted: true },
+            },
+          },
+        ],
+      }),
+    });
+
+    ExamQuestion.find = () => ({ select: () => ({ lean: async () => [] }) });
+    ExamAnswerSubmission.find = () => ({ sort: () => ({ select: () => ({ lean: async () => [] }) }) });
+    ExamCodeSubmission.find = () => ({ sort: () => ({ select: () => ({ lean: async () => [] }) }) });
+
+    const res = createMockRes();
+    await getExamMonitoring({ params: { examId: examId.toString() }, query: {} }, res, () => {});
+    assert.equal(res.statusCode, 200);
+
+    const enrolledRows = res.data.students.filter((r) => r.studentId === sEnrolledNotStarted.toString());
+    assert.equal(enrolledRows.length, 2);
+    assert.ok(enrolledRows.every((r) => r.examStatus === "Not Started" && r.solutionStatus === "Not Solved"));
+
+    const solvedRows = res.data.students.filter((r) => r.studentId === sAllSolvedNotFinished.toString());
+    assert.equal(solvedRows.length, 2);
+    assert.ok(solvedRows.every((r) => r.solutionStatus === "Solved" && r.examStatus === "In Progress"));
+  } finally {
+    Exam.findById = origExamFindById;
+    ExamAllocation.find = origAllocFind;
+    StudentExamProgress.find = origProgFind;
+    ExamAnswerSubmission.find = origAnsFind;
+    ExamCodeSubmission.find = origCodeFind;
+    ExamQuestion.find = origQFind;
+  }
+});

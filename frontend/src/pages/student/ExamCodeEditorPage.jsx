@@ -536,7 +536,8 @@ const ExamCodeEditorPage = () => {
 
   const handleRun = async () => {
     if (running || submitting) return;
-    if (!code.trim()) {
+    const liveCode = editorRef.current?.getValue?.() ?? codeRef.current ?? code;
+    if (!liveCode || !liveCode.trim()) {
       setErrorMsg("Cannot run empty code.");
       return;
     }
@@ -547,7 +548,7 @@ const ExamCodeEditorPage = () => {
       setRunResult(null);
       setActiveTab("run");
 
-      const res = await runExamCode(examId, code, data?.question?._id);
+      const res = await runExamCode(examId, liveCode, data?.question?._id);
       setRunResult(res);
     } catch (err) {
       if (err.response?.data?.isCompleted) {
@@ -612,7 +613,8 @@ const ExamCodeEditorPage = () => {
 
   const handleSubmit = async () => {
     if (running || submitting) return;
-    if (!code.trim()) {
+    const liveCode = editorRef.current?.getValue?.() ?? codeRef.current ?? code;
+    if (!liveCode || !liveCode.trim()) {
       setErrorMsg("Cannot submit empty code.");
       return;
     }
@@ -632,8 +634,19 @@ const ExamCodeEditorPage = () => {
       setExpandedHiddenCases({});
       setActiveTab("submit");
 
-      const res = await submitExamCode(examId, code, data?.question?._id);
+      const res = await submitExamCode(examId, liveCode, data?.question?._id);
       setSubmitResult(res);
+
+      const submittedQId = data?.question?._id?.toString();
+      if (submittedQId) {
+        draftsCacheRef.current.set(submittedQId, liveCode);
+        writeLocalDraft(submittedQId, {
+          code: liveCode,
+          version: draftVersionRef.current.get(submittedQId) || 0,
+          updatedAt: Date.now(),
+          synced: true,
+        });
+      }
 
       if (res.allPassed) {
         examLockedRef.current = true;

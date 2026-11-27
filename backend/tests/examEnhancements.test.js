@@ -2014,15 +2014,15 @@ test("15. Multi-Question Exam Navigation and Dual Completion Conditions (All Sub
   assert.equal(resA1.data.remainingQuestionCount, 4);
   assert.equal(resA1.data.nextQuestion._id.toString(), qIds[1].toString());
 
-  // 3. Duplicate submission of Q1 must NOT increment count above 1
+  // 3. Re-submission of Q1 succeeds and must NOT increment count above 1
   const resA1Dup = createMockRes();
   await submitExamCode(
     { params: { examId: examId.toString() }, user: { userId: studentAId.toString() }, body: { code: validSumCode, questionId: qIds[0].toString() } },
     resA1Dup,
     () => {}
   );
-  assert.equal(resA1Dup.statusCode, 409);
-  assert.equal(resA1Dup.data.alreadySubmitted, true);
+  assert.equal(resA1Dup.statusCode, 201);
+  assert.equal(resA1Dup.data.submittedQuestionCount, 1);
 
   // 4. Student A submits Q2, Q3, Q4, Q5 -> completes exam on Q5 (5/5)
   for (let i = 1; i < 5; i++) {

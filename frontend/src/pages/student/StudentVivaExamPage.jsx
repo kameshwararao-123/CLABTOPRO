@@ -392,8 +392,8 @@ const StudentVivaExamPage = () => {
                 <p className="text-base font-bold text-slate-800 mt-0.5">{exam?.totalQuestions || "—"}</p>
               </div>
               <div>
-                <span className="text-[11px] font-semibold text-slate-400 uppercase">Total Marks</span>
-                <p className="text-base font-bold text-slate-800 mt-0.5">{exam?.totalMarks}</p>
+                <span className="text-[11px] font-semibold text-slate-400 uppercase">Exam Type</span>
+                <p className="text-base font-bold text-slate-800 mt-0.5 uppercase">Viva</p>
               </div>
               <div>
                 <span className="text-[11px] font-semibold text-slate-400 uppercase">Negative Mark</span>
@@ -598,9 +598,6 @@ const StudentVivaExamPage = () => {
                 </span>
                 <span className="text-xs text-slate-400">
                   of {questions.length} Questions
-                </span>
-                <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-600">
-                  +{currentQuestion?.marks || exam?.marksPerQuestion || 1} Marks
                 </span>
                 {exam?.negativeMarkingEnabled && (
                   <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200">
