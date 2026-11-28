@@ -78,7 +78,8 @@ const AdminExamDetails = () => {
   const [monitoringSearch, setMonitoringSearch] = useState("");
   const [monitoringStatusFilter, setMonitoringStatusFilter] = useState("all");
   const [monitoringPage, setMonitoringPage] = useState(1);
-  const MONITORING_PAGE_SIZE = 25;
+  const [monitoringPageSize, setMonitoringPageSize] = useState(25);
+  const MONITORING_PAGE_SIZE = monitoringPageSize === "all" ? Number.MAX_SAFE_INTEGER : Number(monitoringPageSize);
   const [actionLoading, setActionLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
@@ -1569,6 +1570,65 @@ const AdminExamDetails = () => {
             </div>
           </div>
 
+          {/* Summary Counters (across all enrolled students, independent of active filters) */}
+          {monitoringData && (() => {
+            const fallbackMap = new Map();
+            for (const r of monitoringData.students || []) {
+              const cur = fallbackMap.get(r.studentId) || {
+                examStatus: r.examStatus || "Not Started",
+                waitingForEvaluation: false,
+              };
+              if (
+                r.examStatus !== "Completed" &&
+                ["evaluate", "evaluating", "allow_to_code", "return_to_notepad"].includes(r.evaluationAction)
+              ) {
+                cur.waitingForEvaluation = true;
+              }
+              fallbackMap.set(r.studentId, cur);
+            }
+            let fbWait = 0;
+            let fbProg = 0;
+            let fbEval = 0;
+            let fbComp = 0;
+            for (const st of fallbackMap.values()) {
+              if (st.examStatus === "Completed") fbComp += 1;
+              else if (st.waitingForEvaluation) fbEval += 1;
+              else if (st.examStatus === "In Progress") fbProg += 1;
+              else fbWait += 1;
+            }
+            const summary = monitoringData.summary || {
+              totalEnrolled: monitoringData.totalStudents ?? fallbackMap.size,
+              waitingToStart: fbWait,
+              inProgress: fbProg,
+              waitingForEvaluation: fbEval,
+              completed: fbComp,
+            };
+            return (
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-xs">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Total Enrolled</div>
+                  <div className="mt-1 text-2xl font-bold text-slate-900">{summary.totalEnrolled}</div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-xs">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Waiting to Start</div>
+                  <div className="mt-1 text-2xl font-bold text-slate-700">{summary.waitingToStart}</div>
+                </div>
+                <div className="rounded-2xl border border-indigo-200 bg-indigo-50/50 px-4 py-3 shadow-xs">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-indigo-700">In Progress</div>
+                  <div className="mt-1 text-2xl font-bold text-indigo-800">{summary.inProgress}</div>
+                </div>
+                <div className="rounded-2xl border border-amber-200 bg-amber-50/50 px-4 py-3 shadow-xs">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-amber-700">Waiting for Evaluation</div>
+                  <div className="mt-1 text-2xl font-bold text-amber-800">{summary.waitingForEvaluation}</div>
+                </div>
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 px-4 py-3 shadow-xs">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-700">Completed / Submitted</div>
+                  <div className="mt-1 text-2xl font-bold text-emerald-800">{summary.completed}</div>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Search & Status Filter Bar */}
           <div className="flex flex-wrap items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs">
             <div className="relative flex-1 min-w-[220px] max-w-md">
@@ -1607,7 +1667,22 @@ const AdminExamDetails = () => {
               <option value="all">All Exam Statuses</option>
               <option value="Not Started">Not Started</option>
               <option value="In Progress">In Progress</option>
+              <option value="Waiting for Evaluation">Waiting for Evaluation</option>
               <option value="Completed">Completed</option>
+            </select>
+            <select
+              value={monitoringPageSize}
+              onChange={(e) => {
+                setMonitoringPageSize(e.target.value === "all" ? "all" : Number(e.target.value));
+                setMonitoringPage(1);
+              }}
+              aria-label="Rows per page"
+              className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 bg-slate-50/60 text-slate-700 focus:bg-white focus:border-indigo-500 focus:outline-hidden"
+            >
+              <option value={25}>25 / page</option>
+              <option value={50}>50 / page</option>
+              <option value={100}>100 / page</option>
+              <option value="all">Show All</option>
             </select>
           </div>
 
@@ -1632,8 +1707,17 @@ const AdminExamDetails = () => {
                   <tbody className="divide-y divide-slate-100 text-slate-700">
                     {(monitoringData.students || [])
                       .filter((s) => {
-                        if (monitoringStatusFilter !== "all" && s.examStatus !== monitoringStatusFilter) {
-                          return false;
+                        if (monitoringStatusFilter !== "all") {
+                          if (monitoringStatusFilter === "Waiting for Evaluation") {
+                            if (
+                              s.examStatus === "Completed" ||
+                              !["evaluate", "evaluating", "allow_to_code", "return_to_notepad"].includes(s.evaluationAction)
+                            ) {
+                              return false;
+                            }
+                          } else if (s.examStatus !== monitoringStatusFilter) {
+                            return false;
+                          }
                         }
                         if (!monitoringSearch.trim()) return true;
                         const q = monitoringSearch.trim().toLowerCase();
@@ -1703,6 +1787,56 @@ const AdminExamDetails = () => {
                   </tbody>
                 </table>
               </div>
+              {(() => {
+                const totalFiltered = (monitoringData.students || []).filter((s) => {
+                  if (monitoringStatusFilter !== "all") {
+                    if (monitoringStatusFilter === "Waiting for Evaluation") {
+                      if (
+                        s.examStatus === "Completed" ||
+                        !["evaluate", "evaluating", "allow_to_code", "return_to_notepad"].includes(s.evaluationAction)
+                      ) {
+                        return false;
+                      }
+                    } else if (s.examStatus !== monitoringStatusFilter) {
+                      return false;
+                    }
+                  }
+                  if (!monitoringSearch.trim()) return true;
+                  const q = monitoringSearch.trim().toLowerCase();
+                  return (
+                    s.username?.toLowerCase().includes(q) ||
+                    s.rollNo?.toLowerCase().includes(q) ||
+                    s.email?.toLowerCase().includes(q)
+                  );
+                }).length;
+                const totalPages = Math.max(1, Math.ceil(totalFiltered / MONITORING_PAGE_SIZE));
+                if (totalFiltered <= MONITORING_PAGE_SIZE) return null;
+                return (
+                  <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100 bg-slate-50/50 text-xs text-slate-600">
+                    <span>
+                      Page <strong>{monitoringPage}</strong> of <strong>{totalPages}</strong> ({totalFiltered} rows)
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={monitoringPage <= 1}
+                        onClick={() => setMonitoringPage((p) => Math.max(1, p - 1))}
+                        className="px-3 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 font-semibold disabled:opacity-40"
+                      >
+                        Prev
+                      </button>
+                      <button
+                        type="button"
+                        disabled={monitoringPage >= totalPages}
+                        onClick={() => setMonitoringPage((p) => Math.min(totalPages, p + 1))}
+                        className="px-3 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 font-semibold disabled:opacity-40"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           ) : (
             <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
@@ -1724,8 +1858,17 @@ const AdminExamDetails = () => {
                   <tbody className="divide-y divide-slate-100 text-slate-700">
                     {(monitoringData.students || [])
                       .filter((s) => {
-                        if (monitoringStatusFilter !== "all" && s.examStatus !== monitoringStatusFilter) {
-                          return false;
+                        if (monitoringStatusFilter !== "all") {
+                          if (monitoringStatusFilter === "Waiting for Evaluation") {
+                            if (
+                              s.examStatus === "Completed" ||
+                              !["evaluate", "evaluating", "allow_to_code", "return_to_notepad"].includes(s.evaluationAction)
+                            ) {
+                              return false;
+                            }
+                          } else if (s.examStatus !== monitoringStatusFilter) {
+                            return false;
+                          }
                         }
                         if (!monitoringSearch.trim()) return true;
                         const q = monitoringSearch.trim().toLowerCase();
@@ -1980,8 +2123,17 @@ const AdminExamDetails = () => {
               </div>
               {(() => {
                 const totalFiltered = (monitoringData.students || []).filter((s) => {
-                  if (monitoringStatusFilter !== "all" && s.examStatus !== monitoringStatusFilter) {
-                    return false;
+                  if (monitoringStatusFilter !== "all") {
+                    if (monitoringStatusFilter === "Waiting for Evaluation") {
+                      if (
+                        s.examStatus === "Completed" ||
+                        !["evaluate", "evaluating", "allow_to_code", "return_to_notepad"].includes(s.evaluationAction)
+                      ) {
+                        return false;
+                      }
+                    } else if (s.examStatus !== monitoringStatusFilter) {
+                      return false;
+                    }
                   }
                   if (!monitoringSearch.trim()) return true;
                   const q = monitoringSearch.trim().toLowerCase();

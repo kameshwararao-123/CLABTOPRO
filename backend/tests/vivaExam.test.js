@@ -7,6 +7,10 @@ import {
   normalizeOptionLetter,
   normalizeOptionText,
 } from "../services/mcqParserService.js";
+import {
+  selectDistinctQuestionsForStudent,
+  countUniqueQuestions,
+} from "../controllers/examController.js";
 
 // =========================================================================
 // 1. MCQ PARSER UNIT TESTS
@@ -438,4 +442,31 @@ Answer: D
   const unnumberedVal = validateVivaMcqPdf({ rawInput: unnumberedDoc, blocks: unnumberedBlocks });
   assert.equal(unnumberedVal.valid, false);
   assert.ok(unnumberedVal.errors.some((e) => e.includes("No properly numbered Viva MCQ questions")));
+});
+
+test("Viva Question Assignment: allows duplicate questions across students while ensuring uniqueness per student", () => {
+  // Bank has 5 entries, but only 3 unique questions (Q1a==Q1b, Q2a==Q2b, Q3)
+  const q1a = { _id: "650000000000000000000001", questionText: "What is a pointer in C?" };
+  const q1b = { _id: "650000000000000000000002", questionText: "What is a pointer in C?" };
+  const q2a = { _id: "650000000000000000000003", questionText: "What is sizeof(int)?" };
+  const q2b = { _id: "650000000000000000000004", questionText: "What is sizeof(int)?" };
+  const q3 = { _id: "650000000000000000000005", questionText: "Which header declares printf?" };
+  const bank = [q1a, q1b, q2a, q2b, q3];
+
+  assert.equal(countUniqueQuestions(bank), 3);
+
+  const usedCombos = new Set();
+  const student1 = selectDistinctQuestionsForStudent(bank, 3, usedCombos);
+  const student2 = selectDistinctQuestionsForStudent(bank, 3, usedCombos);
+
+  // Both students get 3 unique questions (even though they share the same 3 questions)
+  assert.equal(student1.length, 3);
+  assert.equal(student2.length, 3);
+  assert.equal(new Set(student1.map((q) => q.questionText)).size, 3);
+  assert.equal(new Set(student2.map((q) => q.questionText)).size, 3);
+
+  // If requesting k=5 (more than 3 unique), never pad with duplicates -> returns only 3 unique
+  const capped = selectDistinctQuestionsForStudent(bank, 5, new Set());
+  assert.equal(capped.length, 3);
+  assert.equal(new Set(capped.map((q) => q.questionText)).size, 3);
 });

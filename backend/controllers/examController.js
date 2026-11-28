@@ -75,6 +75,39 @@ export const generateUniqueExamCode = async (prefix = "CLAB") => {
  * Ensures a student never receives duplicate questions within their assignment.
  * When multiple students are allocated, maximizes combination diversity.
  */
+const getQuestionUniquenessKey = (q) => {
+  if (!q || typeof q !== "object") return String(q || "");
+  const raw = String(q.questionText || q.problemStatement || q.title || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  if (raw) return `text:${raw}`;
+  return q._id ? `id:${q._id.toString()}` : "";
+};
+
+export const countUniqueQuestions = (questions = []) => {
+  const seenIds = new Set();
+  const seenKeys = new Set();
+  let count = 0;
+  for (const q of questions) {
+    const idKey = q?._id ? q._id.toString() : String(q);
+    const contentKey = getQuestionUniquenessKey(q);
+    if (seenIds.has(idKey) || (contentKey && seenKeys.has(contentKey))) {
+      continue;
+    }
+    seenIds.add(idKey);
+    if (contentKey) seenKeys.add(contentKey);
+    count++;
+  }
+  return count;
+};
+
+/**
+ * Ensures a student never receives duplicate questions within their assignment
+ * (by _id or question content), while allowing different students to receive
+ * the same question even when duplicates exist in the question bank.
+ * Never pads with duplicates if fewer than k unique questions exist.
+ */
 export const selectDistinctQuestionsForStudent = (questions, k, usedCombos = new Set()) => {
   let selected = [];
   let attempts = 0;
@@ -82,9 +115,22 @@ export const selectDistinctQuestionsForStudent = (questions, k, usedCombos = new
 
   do {
     const shuffled = fisherYatesShuffle(questions);
-    selected = shuffled.slice(0, k);
+    const seenIds = new Set();
+    const seenContentKeys = new Set();
+    selected = [];
+    for (const q of shuffled) {
+      if (selected.length >= k) break;
+      const idKey = q?._id ? q._id.toString() : String(q);
+      const contentKey = getQuestionUniquenessKey(q);
+      if (seenIds.has(idKey) || (contentKey && seenContentKeys.has(contentKey))) {
+        continue;
+      }
+      seenIds.add(idKey);
+      if (contentKey) seenContentKeys.add(contentKey);
+      selected.push(q);
+    }
     comboKey = selected
-      .map((q) => (q._id ? q._id.toString() : String(q)))
+      .map((q) => (q?._id ? q._id.toString() : String(q)))
       .sort()
       .join(",");
     attempts++;
@@ -741,7 +787,7 @@ export const allocateExamQuestions = async (req, res, next) => {
     }
 
     const questions = await ExamQuestion.find({ examId })
-      .select("_id title questionNumber difficulty marks")
+      .select("_id title questionNumber difficulty marks questionText problemStatement")
       .lean();
 
     if (questions.length === 0) {
@@ -750,11 +796,17 @@ export const allocateExamQuestions = async (req, res, next) => {
       });
     }
 
-    if (k > questions.length) {
+    const uniqueQuestionCount = countUniqueQuestions(questions);
+    const isVivaExam = exam.examType === "viva";
+
+    if (!isVivaExam && k > questions.length) {
       return res.status(400).json({
         message: `Insufficient questions available! The exam has only ${questions.length} question(s) in the bank, but ${k} question(s) per student were requested. Maximum allowed is ${questions.length}.`,
       });
     }
+
+    const effectiveK = isVivaExam ? Math.min(k, uniqueQuestionCount) : k;
+    const insufficientUniqueQuestions = isVivaExam && uniqueQuestionCount < k;
 
     // Try dropping legacy unique index if it exists in MongoDB
     try {
@@ -764,10 +816,10 @@ export const allocateExamQuestions = async (req, res, next) => {
     // Clear previous draft allocations for this exam
     await ExamAllocation.deleteMany({ examId });
 
-    // Select k distinct questions per student using Fisher-Yates shuffle
+    // Select effectiveK distinct questions per student using Fisher-Yates shuffle
     const usedCombinations = new Set();
     const allocationsToInsert = studentIds.map((studentId) => {
-      const selectedQuestions = selectDistinctQuestionsForStudent(questions, k, usedCombinations);
+      const selectedQuestions = selectDistinctQuestionsForStudent(questions, effectiveK, usedCombinations);
       const assignedQIds = selectedQuestions.map((q) => q._id);
       return {
         examId,
@@ -857,9 +909,18 @@ export const allocateExamQuestions = async (req, res, next) => {
     });
 
     res.status(200).json({
-      message: `Successfully allocated ${k} question(s) per student to all ${studentIds.length} participating students.`,
+      message: insufficientUniqueQuestions
+        ? `Assigned ${effectiveK} unique question(s) per student. Not enough unique questions in the bank (${uniqueQuestionCount} unique out of ${k} requested); duplicates were skipped.`
+        : `Successfully allocated ${effectiveK} question(s) per student to all ${studentIds.length} participating students.`,
       allocationsCount: allocationsToInsert.length,
-      questionsPerStudent: k,
+      questionsPerStudent: effectiveK,
+      ...(insufficientUniqueQuestions
+        ? {
+            insufficientUniqueQuestions: true,
+            uniqueQuestionCount,
+            requestedQuestionsPerStudent: k,
+          }
+        : {}),
       allocations: formattedReport,
     });
   } catch (error) {
@@ -1173,7 +1234,7 @@ export const startExam = async (req, res, next) => {
 
     // STEP 5: Retrieve all questions available for allocation
     const questions = await ExamQuestion.find({ examId })
-      .select("_id title questionNumber difficulty marks")
+      .select("_id title questionNumber difficulty marks questionText problemStatement")
       .lean();
 
     if (questions.length === 0) {
@@ -1182,17 +1243,23 @@ export const startExam = async (req, res, next) => {
       });
     }
 
+    const uniqueQuestionCount = countUniqueQuestions(questions);
+    const isVivaExam = exam.examType === "viva";
+
     // STEP 6: Validate question availability against configured k
-    if (k > questions.length) {
+    if (!isVivaExam && k > questions.length) {
       return res.status(400).json({
         message: `Insufficient questions available! The exam has only ${questions.length} question(s) in the bank, but ${k} question(s) per student were configured. Maximum allowed is ${questions.length}.`,
       });
     }
 
+    const effectiveK = isVivaExam ? Math.min(k, uniqueQuestionCount) : k;
+    const insufficientUniqueQuestions = isVivaExam && uniqueQuestionCount < k;
+
     // STEP 7 & 8: Perform Fisher-Yates allocation for all enrolled students
     const usedCombinations = new Set();
     const allocationsToInsert = studentIds.map((studentId) => {
-      const selectedQuestions = selectDistinctQuestionsForStudent(questions, k, usedCombinations);
+      const selectedQuestions = selectDistinctQuestionsForStudent(questions, effectiveK, usedCombinations);
       const assignedQIds = selectedQuestions.map((q) => q._id);
       return {
         examId,
@@ -1254,7 +1321,7 @@ export const startExam = async (req, res, next) => {
     }
 
     const hasInvalidCount = savedAllocations.some(
-      (a) => (a.assignedQuestionIds || []).length !== k
+      (a) => (a.assignedQuestionIds || []).length !== effectiveK
     );
     if (hasInvalidCount) {
       await ExamAllocation.deleteMany({ examId });
@@ -1289,10 +1356,19 @@ export const startExam = async (req, res, next) => {
     }
 
     res.status(200).json({
-      message: "Examination has been started successfully and questions have been allocated to all enrolled students.",
+      message: insufficientUniqueQuestions
+        ? `Examination started. Assigned ${effectiveK} unique question(s) per student (only ${uniqueQuestionCount} unique questions available out of ${k} requested; duplicates skipped).`
+        : "Examination has been started successfully and questions have been allocated to all enrolled students.",
       exam,
       allocationsCount: savedAllocations.length,
-      questionsPerStudent: k,
+      questionsPerStudent: effectiveK,
+      ...(insufficientUniqueQuestions
+        ? {
+            insufficientUniqueQuestions: true,
+            uniqueQuestionCount,
+            requestedQuestionsPerStudent: k,
+          }
+        : {}),
     });
   } catch (error) {
     if (typeof next === "function") {
@@ -1436,7 +1512,7 @@ export const getExamMonitoring = async (req, res, next) => {
     const exam = await (
       typeof examQuery?.select === "function"
         ? examQuery.select(
-            "title subject examType status startedAt completedAt durationMinutes participatingStudents questionsPerStudent totalMarks"
+            "title subject examType status startedAt completedAt durationMinutes participatingStudents enrolledStudents questionsPerStudent totalMarks"
           )
         : examQuery
     ).lean();
@@ -1480,17 +1556,73 @@ export const getExamMonitoring = async (req, res, next) => {
       }
     }
 
-    // Fallback: If no allocations have been created yet, generate virtual entries for participating students
-    if (allocations.length === 0 && exam.participatingStudents?.length > 0) {
-      const partStudents = await User.find({ _id: { $in: exam.participatingStudents } })
+    // Build a complete union of all enrolled/participating/allocated/progressed students
+    // (LEFT JOIN behavior: never drop students who lack ExamAllocation or progress records).
+    const allocByStudentId = new Map();
+    const allStudentIdSet = new Set();
+
+    for (const alloc of allocations || []) {
+      const sId = (alloc?.studentId?._id || alloc?.studentId)?.toString();
+      if (!sId) continue;
+      allStudentIdSet.add(sId);
+      if (!allocByStudentId.has(sId)) {
+        allocByStudentId.set(sId, alloc);
+      }
+    }
+
+    for (const pId of exam.participatingStudents || []) {
+      const sId = (pId?._id || pId)?.toString();
+      if (sId) allStudentIdSet.add(sId);
+    }
+
+    for (const entry of exam.enrolledStudents || []) {
+      const sId = (entry?.studentId?._id || entry?.studentId)?.toString();
+      if (sId) allStudentIdSet.add(sId);
+    }
+
+    for (const p of progresses || []) {
+      const sId = (p?.studentId?._id || p?.studentId)?.toString();
+      if (sId) allStudentIdSet.add(sId);
+    }
+
+    const missingStudentIds = [];
+    for (const sId of allStudentIdSet) {
+      const existingAlloc = allocByStudentId.get(sId);
+      if (!existingAlloc || !existingAlloc.studentId || !existingAlloc.studentId.username) {
+        missingStudentIds.push(sId);
+      }
+    }
+
+    const userById = new Map();
+    if (missingStudentIds.length > 0) {
+      const missingUsers = await User.find({ _id: { $in: missingStudentIds } })
         .select("username rollNo email")
         .lean();
-      allocations = partStudents.map((st) => ({
-        studentId: st,
-        questionId: null,
-        assignedQuestionIds: [],
-      }));
+      for (const u of missingUsers || []) {
+        if (u?._id) {
+          userById.set(u._id.toString(), u);
+        }
+      }
     }
+
+    const mergedAllocations = [];
+    for (const sId of allStudentIdSet) {
+      const existingAlloc = allocByStudentId.get(sId);
+      if (existingAlloc && existingAlloc.studentId && existingAlloc.studentId._id) {
+        mergedAllocations.push(existingAlloc);
+      } else {
+        const userDoc = userById.get(sId);
+        if (userDoc) {
+          mergedAllocations.push({
+            ...(existingAlloc || {}),
+            studentId: userDoc,
+            questionId: existingAlloc?.questionId || null,
+            assignedQuestionIds: existingAlloc?.assignedQuestionIds || [],
+          });
+        }
+      }
+    }
+    allocations = mergedAllocations;
 
     const progressMap = new Map(progresses.map((p) => [p.studentId.toString(), p]));
     // Map of studentId -> latest ExamAnswerSubmission
@@ -1870,6 +2002,49 @@ export const getExamMonitoring = async (req, res, next) => {
       }
     }
 
+    const studentSummaryMap = new Map();
+    for (const r of rows) {
+      const existing = studentSummaryMap.get(r.studentId) || {
+        examStatus: r.examStatus || "Not Started",
+        waitingForEvaluation: false,
+        vivaScore: r.vivaScore,
+        vivaPercentage: r.vivaPercentage,
+      };
+      if (
+        r.examStatus !== "Completed" &&
+        ["evaluate", "evaluating", "allow_to_code", "return_to_notepad"].includes(r.evaluationAction)
+      ) {
+        existing.waitingForEvaluation = true;
+      }
+      studentSummaryMap.set(r.studentId, existing);
+    }
+
+    let summaryWaitingToStart = 0;
+    let summaryInProgress = 0;
+    let summaryWaitingForEvaluation = 0;
+    let summaryCompleted = 0;
+
+    for (const st of studentSummaryMap.values()) {
+      if (st.examStatus === "Completed") {
+        summaryCompleted += 1;
+      } else if (st.waitingForEvaluation) {
+        summaryWaitingForEvaluation += 1;
+      } else if (st.examStatus === "In Progress") {
+        summaryInProgress += 1;
+      } else {
+        summaryWaitingToStart += 1;
+      }
+    }
+
+    const totalEnrolledStudents = studentSummaryMap.size;
+    const summary = {
+      totalEnrolled: totalEnrolledStudents,
+      waitingToStart: summaryWaitingToStart,
+      inProgress: summaryInProgress,
+      waitingForEvaluation: summaryWaitingForEvaluation,
+      completed: summaryCompleted,
+    };
+
     let vivaSummary = null;
     let codingSummary = null;
 
@@ -1881,17 +2056,17 @@ export const getExamMonitoring = async (req, res, next) => {
       let completedScoresCount = 0;
       let passCount = 0;
 
-      for (const r of rows) {
-        if (r.examStatus === "Completed") {
+      for (const st of studentSummaryMap.values()) {
+        if (st.examStatus === "Completed") {
           completedCount++;
-          if (r.vivaScore !== null && !isNaN(r.vivaScore)) {
-            totalScoreSum += r.vivaScore;
+          if (st.vivaScore !== null && !isNaN(st.vivaScore)) {
+            totalScoreSum += st.vivaScore;
             completedScoresCount++;
           }
-          if (r.vivaPercentage !== null && r.vivaPercentage >= 40) {
+          if (st.vivaPercentage !== null && st.vivaPercentage >= 40) {
             passCount++;
           }
-        } else if (r.examStatus === "In Progress") {
+        } else if (st.examStatus === "In Progress") {
           inProgressCount++;
         } else {
           notStartedCount++;
@@ -1899,7 +2074,7 @@ export const getExamMonitoring = async (req, res, next) => {
       }
 
       vivaSummary = {
-        totalEnrolled: rows.length,
+        totalEnrolled: totalEnrolledStudents,
         inProgress: inProgressCount,
         completed: completedCount,
         notStarted: notStartedCount,
@@ -1909,8 +2084,9 @@ export const getExamMonitoring = async (req, res, next) => {
       };
     } else {
       codingSummary = {
-        totalEnrolled: rows.length,
-        successfullyCompleted: rows.filter((r) => r.examStatus === "Completed").length,
+        totalEnrolled: totalEnrolledStudents,
+        successfullyCompleted: summaryCompleted,
+        waitingForEvaluation: summaryWaitingForEvaluation,
         codingInProgress: rows.filter(
           (r) => r.examStatus === "In Progress" && r.codingStatus === "In Progress"
         ).length,
@@ -1919,7 +2095,7 @@ export const getExamMonitoring = async (req, res, next) => {
         ).length,
         failed: rows.filter((r) => r.codingStatus === "Submitted" && r.testCasesStatus && !r.isQuestionSolved).length,
         timeExpired: rows.filter((r) => r.status === "time_expired").length,
-        notStarted: rows.filter((r) => r.examStatus === "Not Started").length,
+        notStarted: summaryWaitingToStart,
       };
     }
 
@@ -1947,8 +2123,17 @@ export const getExamMonitoring = async (req, res, next) => {
     const searchFilter = String(req.query?.search || "").trim().toLowerCase();
     const statusFilter = String(req.query?.status || "").trim();
     const filteredRows = rows.filter((r) => {
-      if (statusFilter && statusFilter !== "all" && r.examStatus !== statusFilter) {
-        return false;
+      if (statusFilter && statusFilter !== "all") {
+        if (statusFilter === "Waiting for Evaluation") {
+          if (
+            r.examStatus === "Completed" ||
+            !["evaluate", "evaluating", "allow_to_code", "return_to_notepad"].includes(r.evaluationAction)
+          ) {
+            return false;
+          }
+        } else if (r.examStatus !== statusFilter) {
+          return false;
+        }
       }
       if (searchFilter) {
         return (
@@ -1975,7 +2160,8 @@ export const getExamMonitoring = async (req, res, next) => {
       status: exam.status,
       startedAt: exam.startedAt,
       durationMinutes: exam.durationMinutes,
-      totalStudents: allocations.length,
+      totalStudents: totalEnrolledStudents,
+      summary,
       vivaSummary,
       codingSummary,
       students: pagedRows,
